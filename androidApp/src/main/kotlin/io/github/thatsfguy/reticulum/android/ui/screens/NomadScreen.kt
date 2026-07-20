@@ -20,6 +20,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
@@ -28,12 +31,13 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -41,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,6 +62,8 @@ import io.github.thatsfguy.reticulum.nomad.LinkTarget
 import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
 import io.github.thatsfguy.reticulum.nomad.FormSubmitTarget
 import io.github.thatsfguy.reticulum.nomad.parseFormSubmitTarget
+import io.github.thatsfguy.reticulum.nomad.formatNomadUrl
+import io.github.thatsfguy.reticulum.nomad.parseNomadUrl
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredNomadPage
 import kotlinx.coroutines.launch
@@ -81,20 +88,20 @@ private const val DEFAULT_PAGE_PATH = "/page/index.mu"
 fun NomadScreen(viewModel: ReticulumViewModel) {
     val destinations by viewModel.allDestinations.collectAsState(initial = emptyList())
     val cachedHashes by viewModel.cachedNomadDestHashes.collectAsState(initial = emptySet())
-    val filter by viewModel.nomadFilter.collectAsState()
     val search by viewModel.nomadSearch.collectAsState()
     val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
 
-    val nomadNodes = remember(destinations, cachedHashes, filter, search) {
-        val all = destinations.filter { it.appName == "nomadnetwork.node" }
-        val byFilter = when (filter) {
-            ReticulumViewModel.NomadFilter.All       -> all
-            ReticulumViewModel.NomadFilter.Favorites -> all.filter { it.favorite }
-            ReticulumViewModel.NomadFilter.Cached    -> all.filter { it.hash in cachedHashes }
-        }
+    // Same shape as Rooms: Favorites always shown in full; search only
+    // filters the Discovered section.
+    val allNomadNodes = remember(destinations) {
+        destinations.filter { it.appName == "nomadnetwork.node" }
+    }
+    val favoriteNodes = remember(allNomadNodes) { allNomadNodes.filter { it.favorite } }
+    val allDiscoveredNodes = remember(allNomadNodes) { allNomadNodes.filter { !it.favorite } }
+    val discoveredNodes = remember(allDiscoveredNodes, search) {
         val q = search.trim().lowercase()
-        if (q.isEmpty()) byFilter
-        else byFilter.filter { d ->
+        if (q.isEmpty()) allDiscoveredNodes
+        else allDiscoveredNodes.filter { d ->
             d.effectiveDisplayName.lowercase().contains(q) ||
                 d.displayName.lowercase().contains(q) ||
                 d.hash.lowercase().contains(q)
@@ -102,6 +109,10 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     }
 
     var selected by remember { mutableStateOf<StoredDestination?>(null) }
+    /** 0 = Nodes directory, 1 = Browser. Picking a node (or deep-link)
+     *  switches to Browser; empty-history Back / list icon returns to
+     *  Nodes without clearing the browser session. */
+    var pane by remember { mutableIntStateOf(0) }
     var pageState by remember { mutableStateOf<PageState>(PageState.Loading) }
     var cacheInfo by remember { mutableStateOf<StoredNomadPage?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
@@ -133,6 +144,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             cacheInfo = null
             pageState = PageState.Loading
             reloadKey++
+            pane = 1
             viewModel.consumePendingNomadSelection()
         }
         // If `match` is null the manual stub the ViewModel inserted
@@ -178,6 +190,8 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  the directory; cross-node link follow now preserves history
      *  as intended. */
     val historyStack = remember { mutableStateListOf<NomadHistoryEntry>() }
+    val forwardStack = remember { mutableStateListOf<NomadHistoryEntry>() }
+    var urlInput by remember { mutableStateOf("") }
     /** Tracks the POST data that produced the currently-rendered
      *  page (null = the page was a GET). The fetch LaunchedEffect
      *  writes this AFTER each successful fetch so a subsequent link
@@ -266,24 +280,98 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     // replaying POST data so a back-from-result lands on the full
     // results page, not the empty form. When the stack is empty we
     // drop back to the directory list (selected = null).
+    fun restoreHistoryEntry(entry: NomadHistoryEntry) {
+        val cur = current ?: return
+        if (entry.dest.hash != cur.hash) {
+            cacheInfo = null
+            pageState = PageState.Loading
+            selected = entry.dest
+        }
+        currentPath = entry.path
+        pendingPostData = entry.postData
+        reloadKey++
+    }
+
+    fun pushCurrentToHistory() {
+        val cur = current ?: return
+        historyStack += NomadHistoryEntry(cur, currentPath, currentPagePostData)
+        forwardStack.clear()
+    }
+
     fun navigateBack() {
         val cur = current ?: return
         val popped = if (historyStack.isNotEmpty()) historyStack.removeAt(historyStack.lastIndex) else null
         if (popped != null) {
-            if (popped.dest.hash != cur.hash) {
+            forwardStack += NomadHistoryEntry(cur, currentPath, currentPagePostData)
+            restoreHistoryEntry(popped)
+        } else {
+            // Empty in-page history → Nodes pane; keep the browser
+            // session so switching back to Browser resumes this page.
+            pane = 0
+        }
+    }
+
+    fun navigateForward() {
+        val cur = current ?: return
+        if (forwardStack.isEmpty()) return
+        val next = forwardStack.removeAt(forwardStack.lastIndex)
+        historyStack += NomadHistoryEntry(cur, currentPath, currentPagePostData)
+        restoreHistoryEntry(next)
+    }
+
+    fun exitToNodeList() {
+        pane = 0
+    }
+
+    fun navigateToUrl(raw: String) {
+        val parsed = parseNomadUrl(raw, current?.hash)
+        if (parsed == null) {
+            if (current != null) {
+                pageState = PageState.Error("Invalid Nomad URL. Try nodehash:/page/index.mu")
+            }
+            return
+        }
+        forwardStack.clear()
+        coroutineScope.launch {
+            val cur = current
+            if (cur == null) {
+                historyStack.clear()
+                forwardStack.clear()
+                currentPagePostData = null
+                val dest = viewModel.resolveOrPrepareDestination(parsed.nodeHashHex)
+                if (dest == null) return@launch
                 cacheInfo = null
                 pageState = PageState.Loading
-                selected = popped.dest
+                selected = dest
+                currentPath = parsed.path
+                reloadKey++
+                pane = 1
+                return@launch
             }
-            currentPath = popped.path
-            pendingPostData = popped.postData
-            // Force re-fetch even when (dest, path) didn't change — only
-            // postData differing still has to hit the network (the cached
-            // entry is path-keyed and would be wrong for the POST result).
+            if (parsed.nodeHashHex != cur.hash) {
+                pushCurrentToHistory()
+                val dest = viewModel.resolveOrPrepareDestination(parsed.nodeHashHex)
+                if (dest == null) {
+                    pageState = PageState.Error(
+                        "Could not resolve destination ${parsed.nodeHashHex.take(8)}… " +
+                            "(service not bound or invalid hash)",
+                    )
+                    return@launch
+                }
+                cacheInfo = null
+                pageState = PageState.Loading
+                selected = dest
+            } else if (parsed.path != currentPath) {
+                pushCurrentToHistory()
+            }
+            currentPath = parsed.path
             reloadKey++
-        } else {
-            selected = null
+            pane = 1
         }
+    }
+
+    LaunchedEffect(current?.hash, currentPath) {
+        current?.let { urlInput = formatNomadUrl(it.hash, currentPath) }
     }
 
     // Issue #36: route the Android system back button through the same
@@ -291,70 +379,110 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     // open; on the directory list we leave it disabled so back propagates
     // to the Activity and leaves the Nomad tab normally (previously it
     // ALWAYS fell through, dropping the user onto another tab mid-browse).
-    BackHandler(enabled = current != null) { navigateBack() }
+    LaunchedEffect(destinations, selected?.hash) {
+        val hash = selected?.hash ?: return@LaunchedEffect
+        val fresh = destinations.firstOrNull { it.hash == hash } ?: return@LaunchedEffect
+        if (fresh != selected) selected = fresh
+    }
 
-    if (current == null) {
-        Column(Modifier.fillMaxSize()) {
-            NomadFilters(
-                filter = filter,
-                search = search,
-                onFilterChange = viewModel::setNomadFilter,
-                onSearchChange = viewModel::setNomadSearch,
+    // System back: in-page history while on Browser; empty history
+    // switches to Nodes. On Nodes, leave disabled so Activity handles it.
+    BackHandler(enabled = pane == 1) {
+        if (current != null && historyStack.isNotEmpty()) navigateBack()
+        else pane = 0
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        TabRow(selectedTabIndex = pane) {
+            Tab(
+                selected = pane == 0,
+                onClick = { pane = 0 },
+                text = { Text("Nodes") },
             )
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            NomadList(
-                nodes = nomadNodes,
+            Tab(
+                selected = pane == 1,
+                onClick = { pane = 1 },
+                text = { Text("Browser") },
+            )
+        }
+        when (pane) {
+            0 -> NomadList(
+                favorites = favoriteNodes,
+                allDiscovered = allDiscoveredNodes,
+                filteredDiscovered = discoveredNodes,
+                search = search,
+                onSearchChange = viewModel::setNomadSearch,
                 cachedHashes = cachedHashes,
                 onPick = {
                     selected = it
                     cacheInfo = null
                     pageState = PageState.Loading
-                    // Fresh entry from the directory — wipe any
-                    // stale in-page Back history from a previous
-                    // session on a different node, reset POST data
-                    // tracking, and snap currentPath back to the
-                    // default index. Cross-node link follow does
-                    // NOT clear these; only an explicit pick-from-
-                    // directory does.
                     historyStack.clear()
+                    forwardStack.clear()
                     currentPagePostData = null
                     currentPath = DEFAULT_PAGE_PATH
+                    pane = 1
                 },
                 onToggleFavorite = { d -> viewModel.setDestinationFavorite(d.hash, !d.favorite) },
             )
-        }
-    } else {
-        Column(Modifier.fillMaxSize()) {
-            // /file/ download status. Inflight = small progress chip;
-            // error = dismissable red banner. Both render ABOVE the
-            // page content so the user keeps their reading context
-            // while the download progresses (the page they linked
-            // from stays visible).
-            FileDownloadStatus(
-                inflightPath = fileInFlight,
-                error = fileError,
-                onDismissError = { fileError = null },
-            )
-            NomadNodeView(
-                node = current,
-                currentPath = currentPath,
-                pageState = pageState,
-                cacheInfo = cacheInfo,
-                identifyOnFetch = identifyOnFetch,
-            onToggleIdentify = {
-                identifyOnFetch = !identifyOnFetch
-                reloadKey++
-            },
-            onReload = { reloadKey++ },
-            onClearCache = {
-                viewModel.clearNomadPageCache(current.hash, currentPath) {
-                    cacheInfo = null
-                    reloadKey++
-                }
-            },
-            onBack = { navigateBack() },
-            onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
-            onLinkClick = { target ->
+            else -> {
+                if (current == null) {
+                    Column(Modifier.fillMaxSize()) {
+                        NomadBrowserBar(
+                            urlInput = urlInput,
+                            onUrlInputChange = { urlInput = it },
+                            canReload = false,
+                            canGoForward = false,
+                            onHome = { urlInput = "" },
+                            onReload = {},
+                            onBack = { pane = 0 },
+                            onForward = {},
+                            onGo = { navigateToUrl(urlInput) },
+                        )
+                        Box(
+                            Modifier.fillMaxSize().padding(24.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                "Pick a node from the Nodes tab, or enter a Nomad URL above.",
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                            )
+                        }
+                    }
+                } else {
+                    Column(Modifier.fillMaxSize()) {
+                        FileDownloadStatus(
+                            inflightPath = fileInFlight,
+                            error = fileError,
+                            onDismissError = { fileError = null },
+                        )
+                        NomadNodeView(
+                            node = current,
+                            currentPath = currentPath,
+                            pageState = pageState,
+                            cacheInfo = cacheInfo,
+                            identifyOnFetch = identifyOnFetch,
+                            urlInput = urlInput,
+                            onUrlInputChange = { urlInput = it },
+                            canGoForward = forwardStack.isNotEmpty(),
+                            onGoHome = { navigateToUrl(formatNomadUrl(current.hash, DEFAULT_PAGE_PATH)) },
+                            onGoToUrl = { navigateToUrl(it) },
+                            onForward = { navigateForward() },
+                            onToggleIdentify = {
+                                identifyOnFetch = !identifyOnFetch
+                                reloadKey++
+                            },
+                            onReload = { reloadKey++ },
+                            onClearCache = {
+                                viewModel.clearNomadPageCache(current.hash, currentPath) {
+                                    cacheInfo = null
+                                    reloadKey++
+                                }
+                            },
+                            onBack = { navigateBack() },
+                            onExitToList = { exitToNodeList() },
+                            onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
+                            onLinkClick = { target ->
                 // v0.1.56: dispatch via parseLinkTarget — covers same-node,
                 // cross-node `<hex>:/path`, bare hash, `nnn@<hex>` shorthand,
                 // and `lxmf@<hex>` (out-of-scope for browser, surfaced as
@@ -408,7 +536,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                             // so Back can walk back through visited
                             // pages — including replaying any POST that
                             // produced the page we're leaving.
-                            historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                            pushCurrentToHistory()
                             currentPath = tgt.path
                         }
                     }
@@ -421,7 +549,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                         coroutineScope.launch {
                             val dest = viewModel.resolveOrPrepareDestination(tgt.destHashHex)
                             if (dest != null) {
-                                historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                                pushCurrentToHistory()
                                 cacheInfo = null
                                 pageState = PageState.Loading
                                 selected = dest
@@ -488,7 +616,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     is FormSubmitTarget.SameNode -> {
                         pendingPostData = prefixedData
                         if (resolved.path != currentPath) {
-                            historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                            pushCurrentToHistory()
                         }
                         currentPath = resolved.path
                         reloadKey++
@@ -497,7 +625,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                         coroutineScope.launch {
                             val dest = viewModel.resolveOrPrepareDestination(resolved.destHashHex)
                             if (dest != null) {
-                                historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                                pushCurrentToHistory()
                                 pendingPostData = prefixedData
                                 cacheInfo = null
                                 pageState = PageState.Loading
@@ -537,8 +665,11 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     current.hash, url, data = varData, identify = identifyOnFetch,
                 ).getOrNull()
             },
-        )
-        }  // close the Column wrapper added for FileDownloadStatus
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -602,40 +733,28 @@ private fun FileDownloadStatus(
 }
 
 @Composable
-private fun NomadFilters(
-    filter: ReticulumViewModel.NomadFilter,
+private fun NomadSearchBar(
     search: String,
-    onFilterChange: (ReticulumViewModel.NomadFilter) -> Unit,
     onSearchChange: (String) -> Unit,
 ) {
-    Column(
-        Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        OutlinedTextField(
-            value = search,
-            onValueChange = onSearchChange,
-            placeholder = { Text("Search") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            trailingIcon = if (search.isNotEmpty()) {
-                { IconButton(onClick = { onSearchChange("") }) {
+    OutlinedTextField(
+        value = search,
+        onValueChange = onSearchChange,
+        placeholder = { Text("Search discovered nodes") },
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+        trailingIcon = if (search.isNotEmpty()) {
+            {
+                IconButton(onClick = { onSearchChange("") }) {
                     Icon(Icons.Default.Clear, contentDescription = "Clear search")
-                } }
-            } else null,
-            singleLine = true,
-            shape = RoundedCornerShape(20.dp),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ReticulumViewModel.NomadFilter.entries.forEach { f ->
-                FilterChip(
-                    selected = filter == f,
-                    onClick = { onFilterChange(f) },
-                    label = { Text(f.label) },
-                )
+                }
             }
-        }
-    }
+        } else null,
+        singleLine = true,
+        shape = RoundedCornerShape(20.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
 }
 
 private sealed class PageState {
@@ -657,77 +776,145 @@ private data class NomadHistoryEntry(
 
 @Composable
 private fun NomadList(
-    nodes: List<StoredDestination>,
+    favorites: List<StoredDestination>,
+    allDiscovered: List<StoredDestination>,
+    filteredDiscovered: List<StoredDestination>,
+    search: String,
+    onSearchChange: (String) -> Unit,
     cachedHashes: Set<String>,
     onPick: (StoredDestination) -> Unit,
     onToggleFavorite: (StoredDestination) -> Unit,
 ) {
-    if (nodes.isEmpty()) {
+    if (favorites.isEmpty() && allDiscovered.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Text(
-                "No NomadNet nodes match. Check filters / search, or wait — " +
-                    "they show up here automatically as `nomadnetwork.node` " +
-                    "announces arrive.",
+                "No NomadNet nodes yet. They show up here automatically as " +
+                    "`nomadnetwork.node` announces arrive — star one to pin it " +
+                    "under Favorites.",
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
             )
         }
         return
     }
     val now = System.currentTimeMillis()
-    LazyColumn(Modifier.fillMaxSize()) {
-        items(nodes, key = { it.hash }) { node ->
-            val ageMs = (now - node.lastSeen).coerceAtLeast(0)
-            val cached = node.hash in cachedHashes
-            Row(
-                Modifier.fillMaxWidth().clickable { onPick(node) }.padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (cached) {
-                            Box(
-                                Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primary),
-                            )
-                            Spacer(Modifier.size(8.dp))
-                        }
-                        Text(
-                            node.effectiveDisplayName.ifBlank { node.appLabel ?: "(unnamed)" },
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                    }
+    Column(Modifier.fillMaxSize()) {
+        if (allDiscovered.isNotEmpty()) {
+            NomadSearchBar(
+                search = search,
+                onSearchChange = onSearchChange,
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        }
+        LazyColumn(Modifier.fillMaxSize()) {
+            if (favorites.isNotEmpty()) {
+                item("favorites_header") {
                     Text(
-                        node.hash,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
+                        "Favorites",
+                        style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    val meta = buildList {
-                        if (node.hopCount > 0) add("${node.hopCount} hop${if (node.hopCount != 1) "s" else ""}")
-                        node.rssi?.let { add("RSSI $it dBm") }
-                        add("seen ${formatAge(ageMs)}")
-                        if (cached) add("cached")
-                    }
-                    Text(
-                        meta.joinToString(" · "),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 14.dp, top = 8.dp, bottom = 4.dp),
                     )
                 }
-                IconButton(onClick = { onToggleFavorite(node) }) {
-                    Icon(
-                        imageVector = Icons.Default.Star,
-                        contentDescription = if (node.favorite) "Unfavorite" else "Favorite",
-                        tint = if (node.favorite) MaterialTheme.colorScheme.primary
-                               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                items(favorites, key = { "f-${it.hash}" }) { node ->
+                    NomadNodeRow(
+                        node = node,
+                        ageMs = (now - node.lastSeen).coerceAtLeast(0),
+                        cached = node.hash in cachedHashes,
+                        onPick = onPick,
+                        onToggleFavorite = onToggleFavorite,
                     )
                 }
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (allDiscovered.isNotEmpty()) {
+                item("discovered_header") {
+                    Text(
+                        "Discovered on the network",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 14.dp, top = 12.dp, bottom = 4.dp),
+                    )
+                }
+                if (filteredDiscovered.isEmpty()) {
+                    item("discovered_empty") {
+                        Text(
+                            "No nodes match \"$search\".",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        )
+                    }
+                } else {
+                    items(filteredDiscovered, key = { "d-${it.hash}" }) { node ->
+                        NomadNodeRow(
+                            node = node,
+                            ageMs = (now - node.lastSeen).coerceAtLeast(0),
+                            cached = node.hash in cachedHashes,
+                            onPick = onPick,
+                            onToggleFavorite = onToggleFavorite,
+                        )
+                    }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun NomadNodeRow(
+    node: StoredDestination,
+    ageMs: Long,
+    cached: Boolean,
+    onPick: (StoredDestination) -> Unit,
+    onToggleFavorite: (StoredDestination) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().clickable { onPick(node) }.padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (cached) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary),
+                    )
+                    Spacer(Modifier.size(8.dp))
+                }
+                Text(
+                    node.effectiveDisplayName.ifBlank { node.appLabel ?: "(unnamed)" },
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+            Text(
+                node.hash,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            val meta = buildList {
+                if (node.hopCount > 0) add("${node.hopCount} hop${if (node.hopCount != 1) "s" else ""}")
+                node.rssi?.let { add("RSSI $it dBm") }
+                add("seen ${formatAge(ageMs)}")
+                if (cached) add("cached")
+            }
+            Text(
+                meta.joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        IconButton(onClick = { onToggleFavorite(node) }) {
+            Icon(
+                imageVector = Icons.Default.Star,
+                contentDescription = if (node.favorite) "Unfavorite" else "Favorite",
+                tint = if (node.favorite) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+            )
+        }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
 private fun formatAge(ms: Long): String = when {
@@ -744,6 +931,13 @@ private fun NomadNodeView(
     pageState: PageState,
     cacheInfo: StoredNomadPage?,
     identifyOnFetch: Boolean = false,
+    urlInput: String = "",
+    onUrlInputChange: (String) -> Unit = {},
+    canGoForward: Boolean = false,
+    onGoHome: () -> Unit = {},
+    onGoToUrl: (String) -> Unit = {},
+    onForward: () -> Unit = {},
+    onExitToList: () -> Unit = {},
     onToggleIdentify: () -> Unit = {},
     onReload: () -> Unit,
     onClearCache: () -> Unit,
@@ -755,6 +949,18 @@ private fun NomadNodeView(
 ) {
     val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {
+        NomadBrowserBar(
+            urlInput = urlInput,
+            onUrlInputChange = onUrlInputChange,
+            canReload = pageState !is PageState.Loading,
+            canGoForward = canGoForward,
+            onExitToList = onExitToList,
+            onHome = onGoHome,
+            onReload = onReload,
+            onBack = onBack,
+            onForward = onForward,
+            onGo = { onGoToUrl(urlInput) },
+        )
         // v0.1.79: icon nav bar in place of word-button row. Icons are
         // spread evenly across the width with a small caption under each
         // so the meaning isn't ambiguous. Lock toggles the v0.1.64 opt-in
@@ -870,6 +1076,84 @@ private fun NomadNodeView(
                     onLinkClickWithFields = onSubmitForm,
                     fetchPartial = fetchPartial,
                 )
+        }
+    }
+}
+
+@Composable
+private fun NomadBrowserBar(
+    urlInput: String,
+    onUrlInputChange: (String) -> Unit,
+    canReload: Boolean,
+    canGoForward: Boolean,
+    onExitToList: (() -> Unit)? = null,
+    onHome: () -> Unit,
+    onReload: () -> Unit,
+    onBack: () -> Unit,
+    onForward: () -> Unit,
+    onGo: () -> Unit,
+) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val accent = MaterialTheme.colorScheme.primary
+    val disabled = muted.copy(alpha = 0.35f)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            if (onExitToList != null) {
+                IconButton(onClick = onExitToList) {
+                    Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Node list", tint = accent)
+                }
+            }
+            IconButton(onClick = onHome) {
+                Icon(Icons.Default.Home, contentDescription = "Home", tint = accent)
+            }
+            IconButton(onClick = onReload, enabled = canReload) {
+                Icon(
+                    Icons.Default.Refresh,
+                    contentDescription = "Reload",
+                    tint = if (canReload) accent else disabled,
+                )
+            }
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = accent)
+            }
+            IconButton(onClick = onForward, enabled = canGoForward) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = "Forward",
+                    tint = if (canGoForward) accent else disabled,
+                )
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            OutlinedTextField(
+                value = urlInput,
+                onValueChange = onUrlInputChange,
+                placeholder = { Text("nodehash:/page/index.mu", style = MaterialTheme.typography.bodySmall) },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onGo, enabled = urlInput.isNotBlank()) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = "Go",
+                    tint = if (urlInput.isNotBlank()) accent else disabled,
+                )
+            }
         }
     }
 }

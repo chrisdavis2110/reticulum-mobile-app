@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.android.ui.screens
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import io.github.thatsfguy.reticulum.android.MainActivity
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -34,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -85,6 +87,7 @@ private enum class SettingsRoute(val title: String) {
     Identity("Identity"),
     Features("Features"),
     Privacy("Privacy & security"),
+    Notifications("Notifications"),
     Appearance("Appearance"),
     About("About & diagnostics"),
 }
@@ -207,6 +210,8 @@ fun SettingsScreen(
                             savedBtName.ifBlank { savedBtAddress }
                         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp ->
                             "$savedHost:$savedPort"
+                        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AutoInterface ->
+                            "LAN"
                         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora ->
                             savedAgnLoraName.ifBlank { savedAgnLoraAddress }
                         else -> ""
@@ -411,110 +416,6 @@ fun SettingsScreen(
                 Spacer(Modifier.height(12.dp))
             }
 
-            Text("RNode (Bluetooth)", style = MaterialTheme.typography.titleMedium)
-            // Physical-proximity threat-model notice. The Nordic UART
-            // BLE profile we attach to (the RNode's NUS) is
-            // unauthenticated by default — anyone in BLE range (~30 m)
-            // who can impersonate the RNode could write arbitrary
-            // KISS frames into our parser. The KISS parser has a 64 KB
-            // ceiling (MED-1) so the OOM vector is closed, but
-            // packet-injection is still possible. Bonding the RNode
-            // via Android Settings → Bluetooth limits this — pre-
-            // bonded RNodes are visible here either way. Audit
-            // reference: 2026-05-13 MED-3.
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                        RoundedCornerShape(8.dp),
-                    )
-                    .padding(10.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                Text("⚠", style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "BLE attaches to your RNode over the Nordic UART (NUS) profile, which is " +
-                        "unauthenticated by default. Anyone within ~30 m who can impersonate the " +
-                        "RNode could inject crafted packets. To harden against this, pair the " +
-                        "RNode in Android Settings → Bluetooth first.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                "Scan and add your RNode — the app auto-detects whether it speaks BLE or " +
-                    "Bluetooth Classic. Classic RNodes must be paired in Android Settings first.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(8.dp))
-            var showAddNodeDialog by remember { mutableStateOf(false) }
-            // One picker for both BLE and Bluetooth-Classic RNodes — the
-            // transport is auto-detected from where the device is found
-            // (advertising NUS over BLE vs. bonded as Classic). TCP is
-            // added separately below (you can't scan for an internet host).
-            val bleBusy = connections.any {
-                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
-            } || io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble in pendingKinds
-            val btClassicBusy = connections.any {
-                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
-            } || io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic in pendingKinds
-            val btTransportBusy = bleBusy || btClassicBusy
-            // "Reconnect last" routes by whichever Bluetooth transport
-            // kind is in the remembered set (at most one of BLE/BtClassic
-            // is Bluetooth; non-BT kinds like TCP/AgnLoRa are unaffected).
-            val lastBleSaved = ConnectionMemory.KIND_BLE in savedLastKinds && savedBleAddress.isNotBlank()
-            val lastBtSaved = ConnectionMemory.KIND_BT_CLASSIC in savedLastKinds && savedBtAddress.isNotBlank()
-            if (lastBleSaved || lastBtSaved) {
-                val lastName = (if (lastBtSaved) savedBtName else savedBleName)
-                    .takeIf { it.isNotBlank() } ?: "(unnamed)"
-                val lastAddr = if (lastBtSaved) savedBtAddress else savedBleAddress
-                Text(
-                    "Last: $lastName · $lastAddr",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        val missing = BlePermissions.missing(context)
-                        if (missing.isNotEmpty()) {
-                            onRequestPermissions(missing.toTypedArray())
-                        } else {
-                            showAddNodeDialog = true
-                        }
-                    },
-                    enabled = !btTransportBusy,
-                ) { Text("Add node") }
-                if ((lastBleSaved || lastBtSaved) && !btTransportBusy) {
-                    OutlinedButton(onClick = {
-                        if (lastBtSaved) {
-                            ReticulumService.connectBtClassic(context, savedBtAddress, savedBtName.ifBlank { null })
-                        } else {
-                            ReticulumService.connectBle(context, savedBleAddress, savedBleName.ifBlank { null })
-                        }
-                    }) { Text("Reconnect last") }
-                }
-            }
-            if (showAddNodeDialog) {
-                AddNodeDialog(
-                    onPick = { node ->
-                        showAddNodeDialog = false
-                        when (node.transport) {
-                            NodeTransport.BtClassic ->
-                                ReticulumService.connectBtClassic(context, node.address, node.name)
-                            else -> // Ble or Dual → prefer BLE
-                                ReticulumService.connectBle(context, node.address, node.name)
-                        }
-                    },
-                    onDismiss = { showAddNodeDialog = false },
-                )
-            }
-
             // agnostic-LoRa-Net (ALN) isn't released yet — the whole
             // connect block is gated behind the Optional-features toggle.
             if (agnLoraEnabled) {
@@ -610,6 +511,42 @@ fun SettingsScreen(
                 )
             }
             } // end if (agnLoraEnabled)
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Local network (AutoInterface)",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                "Discovers Reticulum nodes on the same Wi‑Fi via IPv6 multicast. " +
+                    "Interops with desktop rnsd configured with `type = AutoInterface`. " +
+                    "Traffic stays on your LAN — no remote transport operator.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            val autoEntry = connections.firstOrNull {
+                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AutoInterface
+            }
+            val autoPending =
+                io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AutoInterface in pendingKinds
+            val autoAttached = autoEntry != null || autoPending
+            val autoConnected = autoEntry?.transport == TransportState.Connected
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { ReticulumService.connectAutoInterface(context) },
+                    enabled = !autoAttached,
+                ) { Text("Connect AutoInterface") }
+                if (autoAttached) {
+                    OutlinedButton(onClick = {
+                        ReticulumService.disconnectKind(
+                            context,
+                            io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AutoInterface,
+                        )
+                    }) {
+                        Text(if (autoConnected) "Disconnect AutoInterface" else "Cancel")
+                    }
+                }
+            }
 
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -710,6 +647,221 @@ fun SettingsScreen(
             // a destination, not after tapping Connect.
 
             Spacer(Modifier.height(12.dp))
+            Text("RNode (Bluetooth)", style = MaterialTheme.typography.titleMedium)
+            // Physical-proximity threat-model notice. The Nordic UART
+            // BLE profile we attach to (the RNode's NUS) is
+            // unauthenticated by default — anyone in BLE range (~30 m)
+            // who can impersonate the RNode could write arbitrary
+            // KISS frames into our parser. The KISS parser has a 64 KB
+            // ceiling (MED-1) so the OOM vector is closed, but
+            // packet-injection is still possible. Bonding the RNode
+            // via Android Settings → Bluetooth limits this — pre-
+            // bonded RNodes are visible here either way. Audit
+            // reference: 2026-05-13 MED-3.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        RoundedCornerShape(8.dp),
+                    )
+                    .padding(10.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Text("⚠", style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "BLE attaches to your RNode over the Nordic UART (NUS) profile, which is " +
+                        "unauthenticated by default. Anyone within ~30 m who can impersonate the " +
+                        "RNode could inject crafted packets. To harden against this, pair the " +
+                        "RNode in Android Settings → Bluetooth first.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                "Scan and add your RNode — the app auto-detects whether it speaks BLE or " +
+                    "Bluetooth Classic. Classic RNodes must be paired in Android Settings first.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            var showAddNodeDialog by remember { mutableStateOf(false) }
+            // One picker for both BLE and Bluetooth-Classic RNodes — the
+            // transport is auto-detected from where the device is found
+            // (advertising NUS over BLE vs. bonded as Classic). TCP is
+            // added separately below (you can't scan for an internet host).
+            val bleBusy = connections.any {
+                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
+            } || io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble in pendingKinds
+            val btClassicBusy = connections.any {
+                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
+            } || io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic in pendingKinds
+            val btTransportBusy = bleBusy || btClassicBusy
+            // "Reconnect last" routes by whichever Bluetooth transport
+            // kind is in the remembered set (at most one of BLE/BtClassic
+            // is Bluetooth; non-BT kinds like TCP/AgnLoRa are unaffected).
+            val lastBleSaved = ConnectionMemory.KIND_BLE in savedLastKinds && savedBleAddress.isNotBlank()
+            val lastBtSaved = ConnectionMemory.KIND_BT_CLASSIC in savedLastKinds && savedBtAddress.isNotBlank()
+            if (lastBleSaved || lastBtSaved) {
+                val lastName = (if (lastBtSaved) savedBtName else savedBleName)
+                    .takeIf { it.isNotBlank() } ?: "(unnamed)"
+                val lastAddr = if (lastBtSaved) savedBtAddress else savedBleAddress
+                Text(
+                    "Last: $lastName · $lastAddr",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (btTransportBusy) {
+                    // Connected / connecting — primary control lives here
+                    // (parity with TCP / AutoInterface), not only in the
+                    // status list above.
+                    val bleConn = connections.firstOrNull {
+                        it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
+                    }
+                    val btConn = connections.firstOrNull {
+                        it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
+                    }
+                    val activeKind = when {
+                        bleConn != null -> io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
+                        btConn != null -> io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
+                        bleBusy -> io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
+                        else -> io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
+                    }
+                    val activeState = (bleConn ?: btConn)?.transport
+                    Button(
+                        onClick = { ReticulumService.disconnectKind(context, activeKind) },
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) {
+                        Text(
+                            if (activeState == TransportState.Connected) "Disconnect RNode"
+                            else "Cancel connect",
+                        )
+                    }
+                } else {
+                    if (lastBleSaved || lastBtSaved) {
+                        Button(onClick = {
+                            if (lastBtSaved) {
+                                ReticulumService.connectBtClassic(
+                                    context,
+                                    savedBtAddress,
+                                    savedBtName.ifBlank { null },
+                                )
+                            } else {
+                                ReticulumService.connectBle(
+                                    context,
+                                    savedBleAddress,
+                                    savedBleName.ifBlank { null },
+                                )
+                            }
+                        }) { Text("Connect RNode") }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val missing = BlePermissions.missing(context)
+                            if (missing.isNotEmpty()) {
+                                onRequestPermissions(missing.toTypedArray())
+                            } else {
+                                showAddNodeDialog = true
+                            }
+                        },
+                    ) {
+                        Text(if (lastBleSaved || lastBtSaved) "Scan for another" else "Connect RNode")
+                    }
+                }
+            }
+            if (showAddNodeDialog) {
+                AddNodeDialog(
+                    onPick = { node ->
+                        showAddNodeDialog = false
+                        when (node.transport) {
+                            NodeTransport.BtClassic ->
+                                ReticulumService.connectBtClassic(context, node.address, node.name)
+                            else -> // Ble or Dual → prefer BLE
+                                ReticulumService.connectBle(context, node.address, node.name)
+                        }
+                    },
+                    onDismiss = { showAddNodeDialog = false },
+                )
+            }
+        }
+
+        if (route == SettingsRoute.Connection) Section("Radio config (RNode)") {
+            val savedRadio by (service?.prefs?.radioConfig
+                ?: kotlinx.coroutines.flow.MutableStateFlow(io.github.thatsfguy.reticulum.platform.RadioConfig())).collectAsState()
+            var freqMhz by remember(savedRadio) { mutableStateOf((savedRadio.frequencyHz / 1_000_000.0).toString()) }
+            var bwKhz   by remember(savedRadio) {
+                val khz = savedRadio.bandwidthHz / 1000.0
+                mutableStateOf(if (khz % 1.0 == 0.0) khz.toLong().toString() else khz.toString())
+            }
+            var sf      by remember(savedRadio) { mutableStateOf(savedRadio.spreadingFactor.toString()) }
+            var cr      by remember(savedRadio) { mutableStateOf(savedRadio.codingRate.toString()) }
+            var txp     by remember(savedRadio) { mutableStateOf(savedRadio.txPowerDbm.toString()) }
+            val scopeUi = androidx.compose.runtime.rememberCoroutineScope()
+
+            Text(
+                "Applied automatically when BLE connects to an RNode. Match these to the " +
+                    "rest of your mesh (your RatDeck / Sideband / NomadNet peers) — wrong " +
+                    "freq/BW/SF means no one hears you.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = freqMhz, onValueChange = { freqMhz = it.filter { c -> c.isDigit() || c == '.' } },
+                    label = { Text("Freq (MHz)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = bwKhz, onValueChange = { bwKhz = it.filter { c -> c.isDigit() || c == '.' } },
+                    label = { Text("BW (kHz)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = sf, onValueChange = { sf = it.filter { c -> c.isDigit() } },
+                    label = { Text("SF (7-12)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = cr, onValueChange = { cr = it.filter { c -> c.isDigit() } },
+                    label = { Text("CR (5-8)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = txp, onValueChange = { txp = it.filter { c -> c.isDigit() || c == '-' } },
+                    label = { Text("TX (dBm)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    val svc = service ?: return@Button
+                    val cfg = io.github.thatsfguy.reticulum.platform.RadioConfig(
+                        frequencyHz = (freqMhz.toDoubleOrNull()?.let { (it * 1_000_000).toLong() }) ?: savedRadio.frequencyHz,
+                        bandwidthHz = (bwKhz.toDoubleOrNull()?.let { Math.round(it * 1000) }) ?: savedRadio.bandwidthHz,
+                        spreadingFactor = sf.toIntOrNull() ?: savedRadio.spreadingFactor,
+                        codingRate = cr.toIntOrNull() ?: savedRadio.codingRate,
+                        txPowerDbm = txp.toIntOrNull() ?: savedRadio.txPowerDbm,
+                    )
+                    svc.prefs.setRadioConfig(cfg)
+                    scopeUi.launch { runCatching { svc.reapplyRadioConfig() } }
+                }) { Text("Save & apply") }
+            }
+        }
+
+        if (route == SettingsRoute.Connection) Section("Connection") {
             // Auto-reconnect-on-launch toggle. On by default; the
             // service persists the last Connected transport and
             // re-establishes it on a cold start. An explicit Disconnect
@@ -808,6 +960,25 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(16.dp))
 
+            val autoInterfaceEnabled by (service?.prefs?.autoInterfaceEnabled
+                ?: kotlinx.coroutines.flow.MutableStateFlow(true)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("AutoInterface (LAN discovery)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "IPv6 multicast peer discovery on the local Wi‑Fi network.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = autoInterfaceEnabled,
+                    onCheckedChange = { service?.prefs?.setAutoInterfaceEnabled(it) },
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
             val usbEnabled by (service?.prefs?.usbEnabled
                 ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -865,75 +1036,6 @@ fun SettingsScreen(
             }
         }
 
-        if (route == SettingsRoute.Connection) Section("Radio config (RNode)") {
-            val savedRadio by (service?.prefs?.radioConfig
-                ?: kotlinx.coroutines.flow.MutableStateFlow(io.github.thatsfguy.reticulum.platform.RadioConfig())).collectAsState()
-            var freqMhz by remember(savedRadio) { mutableStateOf((savedRadio.frequencyHz / 1_000_000.0).toString()) }
-            var bwKhz   by remember(savedRadio) {
-                val khz = savedRadio.bandwidthHz / 1000.0
-                mutableStateOf(if (khz % 1.0 == 0.0) khz.toLong().toString() else khz.toString())
-            }
-            var sf      by remember(savedRadio) { mutableStateOf(savedRadio.spreadingFactor.toString()) }
-            var cr      by remember(savedRadio) { mutableStateOf(savedRadio.codingRate.toString()) }
-            var txp     by remember(savedRadio) { mutableStateOf(savedRadio.txPowerDbm.toString()) }
-            val scopeUi = androidx.compose.runtime.rememberCoroutineScope()
-
-            Text(
-                "Applied automatically when BLE connects to an RNode. Match these to the " +
-                    "rest of your mesh (your RatDeck / Sideband / NomadNet peers) — wrong " +
-                    "freq/BW/SF means no one hears you.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = freqMhz, onValueChange = { freqMhz = it.filter { c -> c.isDigit() || c == '.' } },
-                    label = { Text("Freq (MHz)") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedTextField(
-                    value = bwKhz, onValueChange = { bwKhz = it.filter { c -> c.isDigit() || c == '.' } },
-                    label = { Text("BW (kHz)") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = sf, onValueChange = { sf = it.filter { c -> c.isDigit() } },
-                    label = { Text("SF (7-12)") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedTextField(
-                    value = cr, onValueChange = { cr = it.filter { c -> c.isDigit() } },
-                    label = { Text("CR (5-8)") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedTextField(
-                    value = txp, onValueChange = { txp = it.filter { c -> c.isDigit() || c == '-' } },
-                    label = { Text("TX (dBm)") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    val svc = service ?: return@Button
-                    val cfg = io.github.thatsfguy.reticulum.platform.RadioConfig(
-                        frequencyHz = (freqMhz.toDoubleOrNull()?.let { (it * 1_000_000).toLong() }) ?: savedRadio.frequencyHz,
-                        bandwidthHz = (bwKhz.toDoubleOrNull()?.let { Math.round(it * 1000) }) ?: savedRadio.bandwidthHz,
-                        spreadingFactor = sf.toIntOrNull() ?: savedRadio.spreadingFactor,
-                        codingRate = cr.toIntOrNull() ?: savedRadio.codingRate,
-                        txPowerDbm = txp.toIntOrNull() ?: savedRadio.txPowerDbm,
-                    )
-                    svc.prefs.setRadioConfig(cfg)
-                    scopeUi.launch { runCatching { svc.reapplyRadioConfig() } }
-                }) { Text("Save & apply") }
-            }
-        }
 
         if (route == SettingsRoute.Identity) Section("Identity") {
             val identityClipboard = LocalClipboardManager.current
@@ -1017,6 +1119,15 @@ fun SettingsScreen(
             )
 
             Spacer(Modifier.height(8.dp))
+            val announceIntervalMs by viewModel.announceIntervalMs.collectAsState(
+                initial = io.github.thatsfguy.reticulum.engine.AnnounceIntervalPresets.DEFAULT_MS,
+            )
+            AnnounceIntervalPicker(
+                selectedMs = announceIntervalMs,
+                onSelect = viewModel::setAnnounceIntervalMs,
+            )
+
+            Spacer(Modifier.height(8.dp))
             // Issue #31: the Send announce button gave no visual feedback,
             // so users couldn't tell whether anything happened. Show a
             // spinner while the announce is in flight, then a transient
@@ -1054,8 +1165,6 @@ fun SettingsScreen(
                 OutlinedButton(onClick = { showResetConfirm = true }) { Text("Reset identity…") }
             }
             announceStatus?.let { status ->
-                // Auto-dismiss the confirmation after a few seconds so it
-                // doesn't linger as stale state.
                 androidx.compose.runtime.LaunchedEffect(status) {
                     kotlinx.coroutines.delay(4000)
                     announceStatus = null
@@ -1067,11 +1176,6 @@ fun SettingsScreen(
                             else MaterialTheme.colorScheme.error,
                 )
             }
-            Text(
-                "An announce is sent automatically every 5 minutes while connected.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
 
             Spacer(Modifier.height(12.dp))
             IdentityBackupBlock(viewModel)
@@ -1203,62 +1307,110 @@ fun SettingsScreen(
             }
         }
 
+        if (route == SettingsRoute.Notifications) {
+            val notifEnabled by (service?.prefs?.notificationsEnabled
+                ?: kotlinx.coroutines.flow.MutableStateFlow(true)).collectAsState()
+            val notifMessages by (service?.prefs?.notificationsMessages
+                ?: kotlinx.coroutines.flow.MutableStateFlow(true)).collectAsState()
+            val notifRooms by (service?.prefs?.notificationsRooms
+                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+            val notifNomad by (service?.prefs?.notificationsNomad
+                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+            val notifSound by (service?.prefs?.notificationsSound
+                ?: kotlinx.coroutines.flow.MutableStateFlow(true)).collectAsState()
+
+            Section("Notifications") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Allow notifications", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Master switch for all Reticulum alerts. When off, nothing is posted " +
+                                "to the notification shade (the connection indicator stays while " +
+                                "a transport is live — Android requires it).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = notifEnabled,
+                        onCheckedChange = { on ->
+                            service?.prefs?.setNotificationsEnabled(on)
+                            if (on && Build.VERSION.SDK_INT >= 33) {
+                                onRequestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS))
+                            }
+                        },
+                    )
+                }
+            }
+
+            Section("Tabs") {
+                NotificationToggleRow(
+                    title = "Messages",
+                    subtitle = null,
+                    checked = notifMessages,
+                    enabled = notifEnabled,
+                    onCheckedChange = { service?.prefs?.setNotificationsMessages(it) },
+                )
+                Spacer(Modifier.height(12.dp))
+                NotificationToggleRow(
+                    title = "Rooms",
+                    subtitle = "Relay Chat hub and room activity. Alerts for Rooms are not posted yet; this stores your preference for when they are.",
+                    checked = notifRooms,
+                    enabled = notifEnabled,
+                    onCheckedChange = { service?.prefs?.setNotificationsRooms(it) },
+                )
+                Spacer(Modifier.height(12.dp))
+                NotificationToggleRow(
+                    title = "Nomad",
+                    subtitle = "NomadNet page and node activity. Alerts for Nomad are not posted yet; this stores your preference for when they are.",
+                    checked = notifNomad,
+                    enabled = notifEnabled,
+                    onCheckedChange = { service?.prefs?.setNotificationsNomad(it) },
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Only Messages posts system notifications today. Rooms and Nomad toggles are ready for when those alerts ship.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Section("Sound") {
+                NotificationToggleRow(
+                    title = "Play sound",
+                    subtitle = "Mute the chime on incoming message alerts. Channel importance in system Settings can still override this.",
+                    checked = notifSound,
+                    enabled = notifEnabled,
+                    onCheckedChange = { service?.prefs?.setNotificationsSound(it) },
+                )
+            }
+
+            Section("System") {
+                TextButton(
+                    onClick = {
+                        val intent = Intent().apply {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                action = Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                            } else {
+                                action = Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                                data = android.net.Uri.fromParts("package", context.packageName, null)
+                            }
+                        }
+                        context.startActivity(intent)
+                    },
+                ) {
+                    Text("Open system notification settings")
+                }
+                Text(
+                    "Grant or revoke permission, and adjust channel importance for Incoming messages.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
         if (route == SettingsRoute.Features) Section("Features") {
-            // NomadNet browser — a real feature, off by default to keep
-            // the default app lean (docs/REDESIGN.md §9). Enabling it
-            // adds a Nomad tab to the bottom bar.
-            val nomadEnabled by (service?.prefs?.nomadEnabled
-                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "NomadNet browser",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Text(
-                        "Browse NomadNet pages — micron-markup sites hosted on "
-                            + "the mesh. Off by default to keep the app lean; "
-                            + "enabling it adds a Nomad tab to the bottom bar.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                androidx.compose.material3.Switch(
-                    checked = nomadEnabled,
-                    onCheckedChange = { service?.prefs?.setNomadEnabled(it) },
-                )
-            }
-
-            Spacer(Modifier.height(16.dp))
-
-            // RRC (Reticulum Relay Chat) is a new wire protocol still
-            // under development — gated so it stays invisible to
-            // ordinary users until it's interop-verified. When ON it
-            // adds a Rooms tab to the bottom bar.
-            val experimentalRrc by (service?.prefs?.experimentalRrc
-                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "Reticulum Relay Chat",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Text(
-                        "IRC-style group chat over Reticulum hubs. In active "
-                            + "development and not yet interop-verified — enable only "
-                            + "to help test it. Adds a Rooms tab to the bottom bar.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                androidx.compose.material3.Switch(
-                    checked = experimentalRrc,
-                    onCheckedChange = { service?.prefs?.setExperimentalRrc(it) },
-                )
-            }
-
-            Spacer(Modifier.height(16.dp))
-
             // agnostic-LoRa-Net BLE transport — not released yet, so its
             // connect UI in Settings → Connection stays hidden until this
             // is enabled.
@@ -1409,6 +1561,7 @@ private fun transportKindLabel(kind: io.github.thatsfguy.reticulum.engine.Reticu
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble        -> "BLE"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic  -> "BT Classic"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp        -> "TCP"
+        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AutoInterface -> "AutoInterface"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Usb        -> "USB"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora -> "AgnLoRa"
         null                                                                          -> "—"
@@ -1675,12 +1828,16 @@ private fun SettingsIndex(connected: Boolean, onNavigate: (SettingsRoute) -> Uni
             onNavigate(SettingsRoute.Identity)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        SettingsIndexRow("Features", "Optional features") {
+        SettingsIndexRow("Features", "Experimental transports") {
             onNavigate(SettingsRoute.Features)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         SettingsIndexRow("Privacy & security", "Message verification & safety") {
             onNavigate(SettingsRoute.Privacy)
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsIndexRow("Notifications", "Alerts, sound, and per-tab toggles") {
+            onNavigate(SettingsRoute.Notifications)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         SettingsIndexRow("Appearance", "Theme — light, dark, or system") {
@@ -1714,6 +1871,33 @@ private fun SettingsIndexRow(label: String, subtitle: String, onClick: () -> Uni
             Icons.Default.KeyboardArrowRight,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun NotificationToggleRow(
+    title: String,
+    subtitle: String?,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            if (subtitle != null) {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        androidx.compose.material3.Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
         )
     }
 }
@@ -2175,5 +2359,36 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AnnounceIntervalPicker(
+    selectedMs: Long,
+    onSelect: (Long) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Auto announce", style = MaterialTheme.typography.bodyMedium)
+        io.github.thatsfguy.reticulum.engine.AnnounceIntervalPresets.options.forEach { option ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelect(option.ms) }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(
+                    selected = selectedMs == option.ms,
+                    onClick = { onSelect(option.ms) },
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(option.label, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        Text(
+            io.github.thatsfguy.reticulum.engine.AnnounceIntervalPresets.summaryFor(selectedMs),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

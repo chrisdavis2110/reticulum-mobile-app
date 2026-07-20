@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.android.storage
 import android.content.Context
 import android.util.Log
 import io.github.thatsfguy.reticulum.crypto.IdentityVault
+import io.github.thatsfguy.reticulum.store.ConversationPreview
 import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
@@ -31,6 +32,22 @@ class Repositories private constructor(
 
     fun observeMessagesForContact(contactHash: String): Flow<List<StoredMessage>> =
         db.messageDao().observeForContact(contactHash).map { rows -> rows.map { it.toModel() } }
+
+    fun observeLatestMessagePreviews(): Flow<List<ConversationPreview>> =
+        db.messageDao().observeLatestMessagePreviews().map { rows ->
+            rows.map { row ->
+                ConversationPreview(
+                    contactHash = row.contactHash,
+                    direction = row.direction,
+                    content = row.content,
+                    timestamp = row.timestamp,
+                    attachmentName = row.attachmentName,
+                    hasImage = row.hasImage != 0L,
+                    hasFile = row.hasFile != 0L,
+                    audioMode = row.audioMode,
+                )
+            }
+        }
 
     /** All known RRC hubs, most-recently-connected first. Drives the
      *  experimental Rooms screen's hub list. */

@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.net.wifi.WifiManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -28,6 +29,7 @@ import io.github.thatsfguy.reticulum.platform.BleTransport
 import io.github.thatsfguy.reticulum.platform.BtClassicTransport
 import io.github.thatsfguy.reticulum.platform.UsbSerialTransport
 import io.github.thatsfguy.reticulum.store.StoredDestination
+import io.github.thatsfguy.reticulum.transport.AutoInterfaceTransport
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.TcpInterface
 import io.github.thatsfguy.reticulum.transport.Transport
@@ -73,6 +75,8 @@ class ReticulumService : Service() {
      *  from the service's main scope. */
     private val currentTransports: MutableMap<ReticulumEngine.TransportKind, Transport> = mutableMapOf()
     private val connectJobs: MutableMap<ReticulumEngine.TransportKind, Job> = mutableMapOf()
+    /** Held while AutoInterface is up — without it Android drops multicast. */
+    private var multicastLock: WifiManager.MulticastLock? = null
     private var eventCollectorJob: Job? = null
     private var notificationUpdateJob: Job? = null
 
@@ -165,6 +169,7 @@ class ReticulumService : Service() {
             nowMs = { System.currentTimeMillis() },
             displayNameProvider = { preferences.getDisplayName() },
             dropUnverifiedProvider = { preferences.dropUnverified.value },
+            announceIntervalMsProvider = { preferences.getAnnounceIntervalMs() },
             nomadPageCache = repositories.nomadPageCache,
             // RRC storage is always wired; the experimental Rooms UI
             // and openRrcSession stay unreachable behind the
@@ -273,6 +278,7 @@ class ReticulumService : Service() {
                 val port = intent.getIntExtra(EXTRA_TCP_PORT, 0)
                 if (host.isNullOrEmpty() || port <= 0) stopSelf() else startTcp(host, port)
             }
+            ACTION_CONNECT_AUTO_INTERFACE -> startAutoInterface()
             ACTION_CONNECT_AGNOSTIC_LORA -> {
                 val address = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_ADDRESS)
                 val name    = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_NAME)
@@ -694,6 +700,73 @@ class ReticulumService : Service() {
         }
     }
 
+    private fun acquireMulticastLock() {
+        if (multicastLock?.isHeld == true) return
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        multicastLock = wifi.createMulticastLock("reticulum-autointerface").apply {
+            setReferenceCounted(true)
+            acquire()
+        }
+    }
+
+    private fun releaseMulticastLock() {
+        multicastLock?.let { lock ->
+            if (lock.isHeld) lock.release()
+        }
+        multicastLock = null
+    }
+
+    private fun startAutoInterface() {
+        val kind = ReticulumEngine.TransportKind.AutoInterface
+        if (!transportEnabled(kind)) {
+            engine.logExternal("AutoInterface: transport disabled in Settings — not connecting")
+            return
+        }
+        cancelConnect(kind)
+        markPending(kind)
+        connectJobs[kind] = scope.launch {
+            var delayMs = 2_000L
+            while (true) {
+                var transport: AutoInterfaceTransport? = null
+                try {
+                    engine.logExternal("AutoInterface: starting LAN discovery (IPv6 multicast)")
+                    acquireMulticastLock()
+                    transport = AutoInterfaceTransport(
+                        scope = scope,
+                        txLogger = { line -> engine.logExternal(line) },
+                        androidPeerTimeout = true,
+                    )
+                    transport.connect()
+                    currentTransports[kind] = transport
+                    engine.attach(transport, kind)
+                    engine.ensureIdentity()
+                    preferences.addLastTransportKind(ConnectionMemory.KIND_AUTO_INTERFACE)
+                    refreshNotification()
+                    delayMs = 2_000L
+
+                    transport.state.collect { st ->
+                        if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
+                            st == io.github.thatsfguy.reticulum.transport.TransportState.Error
+                        ) {
+                            throw IllegalStateException("AutoInterface transport ended: $st")
+                        }
+                    }
+                } catch (t: Throwable) {
+                    engine.logExternal("transport error (AutoInterface): ${t::class.simpleName}: ${t.message}")
+                    releaseMulticastLock()
+                    if (currentTransports[kind] === transport) {
+                        engine.detach(kind)
+                        currentTransports.remove(kind)
+                    }
+                    runCatching { transport?.disconnect() }
+                    refreshNotification(prefix = "Reticulum — AutoInterface reconnecting in ${delayMs / 1000}s")
+                    delay(delayMs)
+                    delayMs = (delayMs * 2).coerceAtMost(60_000L)
+                }
+            }
+        }
+    }
+
     /**
      * USB-serial RNode connect (issue #41, EXPERIMENTAL). Unlike the other
      * transports there's no reconnect supervisor and no auto-restore: a USB
@@ -777,6 +850,7 @@ class ReticulumService : Service() {
         connectJobs.clear()
         _pendingKindsState.value = emptySet()
         _agnosticLoraNodeId.value = null
+        releaseMulticastLock()
         engine.detach(null)
         // Explicit global Disconnect — forget the auto-reconnect target
         // so a relaunch honours the user deliberately going offline.
@@ -792,6 +866,7 @@ class ReticulumService : Service() {
         cancelConnect(kind)
         unmarkPending(kind)
         if (kind == ReticulumEngine.TransportKind.AgnosticLora) _agnosticLoraNodeId.value = null
+        if (kind == ReticulumEngine.TransportKind.AutoInterface) releaseMulticastLock()
         engine.detach(kind)
         val transport = currentTransports.remove(kind)
         if (transport != null) {
@@ -839,6 +914,10 @@ class ReticulumService : Service() {
                     engine.logExternal("restore: reconnecting last TCP node ${mem.host}:${mem.port}")
                     startTcp(mem.host, mem.port)
                 }
+                is ConnectionMemory.AutoInterface -> {
+                    engine.logExternal("restore: reconnecting AutoInterface (LAN)")
+                    startAutoInterface()
+                }
                 is ConnectionMemory.AgnosticLora -> {
                     engine.logExternal(
                         "restore: reconnecting last AgnLoRa node ${mem.address}" +
@@ -857,6 +936,7 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.Ble -> ConnectionMemory.KIND_BLE
         ReticulumEngine.TransportKind.BtClassic -> ConnectionMemory.KIND_BT_CLASSIC
         ReticulumEngine.TransportKind.Tcp -> ConnectionMemory.KIND_TCP
+        ReticulumEngine.TransportKind.AutoInterface -> ConnectionMemory.KIND_AUTO_INTERFACE
         ReticulumEngine.TransportKind.AgnosticLora -> ConnectionMemory.KIND_AGNOSTIC_LORA
         else -> null
     }
@@ -884,6 +964,7 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.Ble -> preferences.bleEnabled.value
         ReticulumEngine.TransportKind.BtClassic -> preferences.btClassicEnabled.value
         ReticulumEngine.TransportKind.Tcp -> preferences.tcpEnabled.value
+        ReticulumEngine.TransportKind.AutoInterface -> preferences.autoInterfaceEnabled.value
         ReticulumEngine.TransportKind.Usb -> preferences.usbEnabled.value
         // ALN is a BLE-NUS tunnel, so it rides on Bluetooth LE — the BLE
         // toggle gates it too. Turning BLE off stops every Bluetooth-LE path,
@@ -1138,11 +1219,19 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.Ble       -> "BLE"
         ReticulumEngine.TransportKind.BtClassic -> "BT Classic"
         ReticulumEngine.TransportKind.Tcp       -> "TCP"
+        ReticulumEngine.TransportKind.AutoInterface -> "AutoInterface"
         ReticulumEngine.TransportKind.Usb       -> "USB"
         ReticulumEngine.TransportKind.AgnosticLora -> "AgnLoRa"
     }
 
-    private fun showIncomingMessageNotification(event: ReticulumEngine.EngineEvent.MessageReceived) {
+    private suspend fun showIncomingMessageNotification(event: ReticulumEngine.EngineEvent.MessageReceived) {
+        if (!preferences.shouldNotifyMessages()) return
+        val destination = repositories.destinations.get(event.contactHash)
+        val destinationName = destination
+            ?.effectiveDisplayName
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() && it != destination?.appLabel }
+            ?: event.contactHash.take(8)
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(EXTRA_OPEN_CONTACT, event.contactHash)
@@ -1151,7 +1240,7 @@ class ReticulumService : Service() {
             this, event.messageId.toInt(), launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val title = if (event.verified) "New message" else "Unverified message"
+        val verificationLabel = if (event.verified) "New message" else "Unverified message"
         // VISIBILITY_PRIVATE keeps the full message content off the
         // lockscreen by default — the system substitutes the
         // setPublicVersion notification when the device is locked. The
@@ -1161,19 +1250,21 @@ class ReticulumService : Service() {
         val publicVersion = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
             .setSmallIcon(R.drawable.ic_stat_message)
             .setContentTitle("Reticulum")
-            .setContentText(title)
+            .setContentText(verificationLabel)
             .setAutoCancel(true)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
         val n = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
             .setSmallIcon(R.drawable.ic_stat_message)
-            .setContentTitle(title)
+            .setContentTitle(destinationName)
+            .setSubText(if (event.verified) null else verificationLabel)
             .setContentText(event.content.take(120))
             .setStyle(NotificationCompat.BigTextStyle().bigText(event.content))
             .setAutoCancel(true)
             .setContentIntent(pi)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
+            .setSilent(!preferences.shouldPlayNotificationSound())
             .build()
         val notificationId = NOTIFICATION_ID_MESSAGE_BASE + event.messageId.toInt()
         synchronized(messageNotificationIds) {
@@ -1200,6 +1291,7 @@ class ReticulumService : Service() {
         const val ACTION_CONNECT_BLE        = "io.github.thatsfguy.reticulum.CONNECT_BLE"
         const val ACTION_CONNECT_BTCLASSIC  = "io.github.thatsfguy.reticulum.CONNECT_BTCLASSIC"
         const val ACTION_CONNECT_TCP        = "io.github.thatsfguy.reticulum.CONNECT_TCP"
+        const val ACTION_CONNECT_AUTO_INTERFACE = "io.github.thatsfguy.reticulum.CONNECT_AUTO_INTERFACE"
         const val ACTION_CONNECT_AGNOSTIC_LORA = "io.github.thatsfguy.reticulum.CONNECT_AGNOSTIC_LORA"
         const val ACTION_CONNECT_USB        = "io.github.thatsfguy.reticulum.CONNECT_USB"
         const val ACTION_USB_PERMISSION     = "io.github.thatsfguy.reticulum.USB_PERMISSION"
@@ -1253,6 +1345,13 @@ class ReticulumService : Service() {
                 action = ACTION_CONNECT_TCP
                 putExtra(EXTRA_TCP_HOST, host)
                 putExtra(EXTRA_TCP_PORT, port)
+            }
+            context.startForegroundService(i)
+        }
+
+        fun connectAutoInterface(context: Context) {
+            val i = Intent(context, ReticulumService::class.java).apply {
+                action = ACTION_CONNECT_AUTO_INTERFACE
             }
             context.startForegroundService(i)
         }

@@ -9,14 +9,17 @@
 import PhotosUI
 import Shared
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 struct ConversationView: View {
     let contact: StoredDestination
+    let onShowContactInfo: () -> Void
     @EnvironmentObject private var store: ReticulumStore
 
     @StateObject private var observer = ConversationObserver()
     @State private var draft: String = ""
+    @FocusState private var composeFocused: Bool
     @State private var showClearConfirm: Bool = false
     // Long-press → Info / Delete targets (iOS parity with Android #23).
     @State private var infoMessage: StoredMessage?
@@ -130,6 +133,9 @@ struct ConversationView: View {
                             replyingTo = msg
                         },
                         onDelete: { pendingDeleteMessage = msg },
+                        onResend: {
+                            store.resendMessage(destinationHash: contact.hash, message: msg)
+                        },
                         onShowInfo: { infoMessage = msg },
                         isPlayingVoice: voicePlayer.playingId == msg.id,
                         onToggleVoice: { toggleVoice(msg) },
@@ -145,9 +151,19 @@ struct ConversationView: View {
                 // gives the user a gestural way out.
                 .scrollDismissesKeyboard(.immediately)
                 .onChange(of: observer.messages.count) { _, _ in
-                    if let last = observer.messages.last {
-                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
+                    scrollToLatest(proxy: proxy)
+                }
+                .onChange(of: composeFocused) { _, focused in
+                    // Keyboard focus shrinks the list; pin the latest
+                    // message above the composer so it isn't hidden.
+                    if focused { scrollToLatest(proxy: proxy, delayed: true) }
+                }
+                .onReceive(
+                    NotificationCenter.default.publisher(
+                        for: UIResponder.keyboardWillShowNotification
+                    )
+                ) { _ in
+                    scrollToLatest(proxy: proxy, delayed: true)
                 }
             }
 
@@ -259,6 +275,7 @@ struct ConversationView: View {
                 TextField("Message \(name)", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...4)
+                    .focused($composeFocused)
 
                 Button {
                     let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -338,10 +355,24 @@ struct ConversationView: View {
                     .padding(.bottom, 4)
             }
         }
-        .navigationTitle(name)
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .keyboardDoneToolbar()
+        // No `.keyboardDoneToolbar()` here — that accessory bar sat
+        // on top of the compose row and covered Send. Scroll-to-
+        // dismiss + Send-dismisses-keyboard already cover exit.
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                Button(action: onShowContactInfo) {
+                    HStack(spacing: 5) {
+                        Text(name)
+                            .font(.headline)
+                        Image(systemName: "info.circle")
+                            .font(.caption)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Contact info for \(name)")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showClearConfirm = true
@@ -406,7 +437,7 @@ struct ConversationView: View {
             // the micron-renderer cross-node tap uses (see
             // NomadView.handleLinkClick → followCrossNode).
             if !store.allDestinations.contains(where: { ($0.hash as String) == hash }) {
-                store.addManualDestination(hashHex: hash, label: "(via shared link)")
+                store.addManualDestination(hashHex: hash, label: "")
                 store.requestPath(hashHex: hash)
             }
             store.openNomadPage(hash: hash, path: path)
@@ -473,6 +504,30 @@ struct ConversationView: View {
                     imageError = "Image too large even at \(tier.label)."
                 }
             }
+        }
+    }
+
+    /// Pin the latest bubble to the bottom of the list — used when a
+    /// new message arrives and when the keyboard opens so the thread
+    /// stays visible above the composer.
+    private func scrollToLatest(proxy: ScrollViewProxy, delayed: Bool = false) {
+        let target = observer.messages.last(where: { msg in
+            if msg.direction == "outgoing-reaction" { return false }
+            let hasText = !msg.content.isEmpty
+            let hasImage = (msg.imageToken?.isEmpty == false) || msg.imageBytes != nil
+            let hasFile = (msg.attachmentToken?.isEmpty == false) || msg.attachmentBytes != nil
+            return hasText || hasImage || hasFile
+        })?.id
+        guard let target else { return }
+        let work = {
+            withAnimation { proxy.scrollTo(target, anchor: .bottom) }
+        }
+        if delayed {
+            // Wait for the keyboard animation / focus transition so
+            // the list's new height is already applied.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28, execute: work)
+        } else {
+            work()
         }
     }
 

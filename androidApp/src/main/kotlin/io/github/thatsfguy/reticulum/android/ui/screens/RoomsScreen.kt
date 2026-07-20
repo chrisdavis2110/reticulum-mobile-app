@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -50,9 +51,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
@@ -76,9 +80,7 @@ import java.util.Locale
  *  - hub detail    — connect to a hub, see / join its rooms
  *  - room chat     — message history + compose box
  *
- * The whole tab is gated by the `experimentalRrc` preference in
- * MainActivity, so this screen is only reachable when the user has
- * opted into the experimental feature.
+ * Rooms tab — IRC-style group chat over Reticulum Relay Chat hubs.
  */
 @Composable
 fun RoomsScreen(viewModel: ReticulumViewModel) {
@@ -107,6 +109,7 @@ fun RoomsScreen(viewModel: ReticulumViewModel) {
                 onAdd = viewModel::addRrcHub,
                 onAddDiscovered = { dest ->
                     viewModel.addRrcHub(dest.hash, dest.effectiveDisplayName, null)
+                    selectedHub = dest.hash
                 },
                 onDelete = viewModel::deleteRrcHub,
             )
@@ -145,6 +148,16 @@ private fun HubListView(
 ) {
     var showAdd by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<StoredRrcHub?>(null) }
+    var discoveredSearch by remember { mutableStateOf("") }
+    val filteredDiscovered = remember(discovered, discoveredSearch) {
+        val q = discoveredSearch.trim().lowercase()
+        if (q.isEmpty()) discovered
+        else discovered.filter { d ->
+            d.effectiveDisplayName.lowercase().contains(q) ||
+                d.displayName.lowercase().contains(q) ||
+                d.hash.lowercase().contains(q)
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -167,34 +180,74 @@ private fun HubListView(
                 actionLabel = "Add by hash",
                 onAction = { showAdd = true },
             )
-        } else if (hubs.isEmpty()) {
-            // Discovery-first empty state: no hubs added yet, but some have
-            // announced — let the user add one in a tap instead of pasting
-            // a 32-hex hash.
-            Column(Modifier.fillMaxSize()) {
-                Text(
-                    "Discovered on the network",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 14.dp, top = 12.dp, bottom = 4.dp),
-                )
-                LazyColumn(Modifier.weight(1f)) {
-                    items(discovered, key = { it.hash }) { d ->
-                        DiscoveredHubRow(dest = d, onAdd = { onAddDiscovered(d) })
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    }
-                }
-            }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(hubs, key = { it.destHash }) { h ->
-                    HubRow(
-                        hub = h,
-                        state = hubStates[h.destHash],
-                        onClick = { onPick(h.destHash) },
-                        onDelete = { pendingDelete = h },
+            Column(Modifier.fillMaxSize()) {
+                if (discovered.isNotEmpty()) {
+                    OutlinedTextField(
+                        value = discoveredSearch,
+                        onValueChange = { discoveredSearch = it },
+                        placeholder = { Text("Search discovered hubs") },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        trailingIcon = if (discoveredSearch.isNotEmpty()) {
+                            {
+                                IconButton(onClick = { discoveredSearch = "" }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                                }
+                            }
+                        } else null,
+                        singleLine = true,
+                        shape = RoundedCornerShape(20.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+                LazyColumn(Modifier.fillMaxSize()) {
+                    if (hubs.isNotEmpty()) {
+                        item("my_hubs_header") {
+                            Text(
+                                "My hubs",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 14.dp, top = 8.dp, bottom = 4.dp),
+                            )
+                        }
+                        items(hubs, key = { it.destHash }) { h ->
+                            HubRow(
+                                hub = h,
+                                state = hubStates[h.destHash],
+                                onClick = { onPick(h.destHash) },
+                                onDelete = { pendingDelete = h },
+                            )
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                    }
+                    if (discovered.isNotEmpty()) {
+                        item("discovered_header") {
+                            Text(
+                                "Discovered on the network",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 14.dp, top = 12.dp, bottom = 4.dp),
+                            )
+                        }
+                        if (filteredDiscovered.isEmpty()) {
+                            item("discovered_empty") {
+                                Text(
+                                    "No hubs match \"$discoveredSearch\".",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                )
+                            }
+                        } else {
+                            items(filteredDiscovered, key = { it.hash }) { d ->
+                                DiscoveredHubRow(dest = d, onAdd = { onAddDiscovered(d) })
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -255,8 +308,6 @@ private fun HubRow(
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        StatusDot(state)
-        Spacer(Modifier.width(12.dp))
         Column {
             Text(
                 state?.hubName ?: hub.displayName.ifBlank { "(unnamed hub)" },
@@ -405,6 +456,8 @@ private fun HubDetailView(
     var showBrowse by remember { mutableStateOf(false) }
     var showEditNick by remember { mutableStateOf(false) }
     var pendingRoomDelete by remember { mutableStateOf<StoredRrcRoom?>(null) }
+    var hashCopied by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
 
     Column(Modifier.fillMaxSize()) {
         DetailHeader(
@@ -414,7 +467,7 @@ private fun HubDetailView(
             onBack = onBack,
         )
 
-        // Connect / disconnect control.
+        // Connect / disconnect control + copyable hub destination hash.
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -422,12 +475,22 @@ private fun HubDetailView(
             StatusDot(state)
             Spacer(Modifier.width(8.dp))
             Text(
-                shortHash(hub.destHash),
+                hub.destHash,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            TextButton(
+                onClick = {
+                    clipboard.setText(AnnotatedString(hub.destHash))
+                    hashCopied = true
+                },
+            ) {
+                Text(if (hashCopied) "Copied" else "Copy ID")
+            }
             if (state?.welcomed == true) {
                 OutlinedButton(onClick = { viewModel.closeRrcSession(hub.destHash) }) { Text("Disconnect") }
             } else {
@@ -441,6 +504,12 @@ private fun HubDetailView(
                         Text("Connect")
                     }
                 }
+            }
+        }
+        LaunchedEffect(hashCopied) {
+            if (hashCopied) {
+                kotlinx.coroutines.delay(1500)
+                hashCopied = false
             }
         }
 

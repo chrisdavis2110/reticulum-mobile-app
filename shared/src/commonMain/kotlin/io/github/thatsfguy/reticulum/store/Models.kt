@@ -53,6 +53,32 @@ data class StoredDestination(
         get() = userLabel?.takeIf { it.isNotBlank() } ?: displayName
 }
 
+/**
+ * Labels the UI used to stamp onto manual stubs for provenance
+ * ("(via URL bar)", cross-node links, …). They must NOT live in
+ * [StoredDestination.userLabel] permanently — that field wins over
+ * announce-derived [StoredDestination.displayName] in
+ * [StoredDestination.effectiveDisplayName], so a later announce would
+ * never replace the placeholder with the node's real name.
+ */
+fun isEphemeralManualLabel(label: String?): Boolean {
+    if (label.isNullOrBlank()) return false
+    return when (label.trim()) {
+        "(via URL bar)",
+        "(via cross-node link)",
+        "(via cross-node form)",
+        "(via shared link)",
+        "(via nomad link)",
+        "(QR scan)",
+        -> true
+        else -> false
+    }
+}
+
+/** Normalize a manual-add label: ephemeral placeholders become null. */
+fun durableUserLabel(label: String?): String? =
+    label?.takeIf { it.isNotBlank() && !isEphemeralManualLabel(it) }
+
 data class StoredMessage(
     val id: Long = 0,
     val contactHash: String,           // destHash hex of the conversation partner
@@ -161,6 +187,20 @@ data class StoredMessage(
      *  [attachmentSize]); this field marks the row as a playable clip and
      *  records which codec produced it. */
     val audioMode: Int? = null,
+)
+
+/** Lightweight newest-message projection for the conversation list.
+ * Attachment payloads are deliberately represented as flags so opening
+ * Messages never loads legacy in-row BLOBs for every contact. */
+data class ConversationPreview(
+    val contactHash: String,
+    val direction: String,
+    val content: String,
+    val timestamp: Long,
+    val attachmentName: String?,
+    val hasImage: Boolean,
+    val hasFile: Boolean,
+    val audioMode: Int?,
 )
 
 interface IdentityRepository {

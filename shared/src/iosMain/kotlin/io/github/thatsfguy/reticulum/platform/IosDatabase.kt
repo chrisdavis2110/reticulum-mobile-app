@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.platform
 import app.cash.sqldelight.driver.native.NativeSqliteDriver
 import io.github.thatsfguy.reticulum.storage.ReticulumIosDatabase
 import io.github.thatsfguy.reticulum.store.DestinationRepository
+import io.github.thatsfguy.reticulum.store.ConversationPreview
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
 import io.github.thatsfguy.reticulum.store.NomadPageCacheRepository
@@ -82,6 +83,25 @@ class IosRepositories private constructor(
     /** Messages for a single conversation, oldest-first. */
     fun observeMessagesForContact(contactHash: String): Flow<List<StoredMessage>> =
         messagesChanges.onStart { emit(Unit) }.map { messages.getForContact(contactHash) }
+
+    /** Latest visible message in each conversation, for thread previews. */
+    fun observeLatestMessagePreviews(): Flow<List<ConversationPreview>> =
+        messagesChanges.onStart { emit(Unit) }.map {
+            db.reticulumIosDatabaseQueries.observeLatestMessagePreviews()
+                .executeAsList()
+                .map { row ->
+                    ConversationPreview(
+                        contactHash = row.contactHash,
+                        direction = row.direction,
+                        content = row.content,
+                        timestamp = row.timestamp,
+                        attachmentName = row.attachmentName,
+                        hasImage = row.hasImage != 0L,
+                        hasFile = row.hasFile != 0L,
+                        audioMode = row.audioMode?.toInt(),
+                    )
+                }
+        }
 
     /** Distinct sender dest hashes for every incoming message — drives
      *  the Messages-tab Inbox section. */

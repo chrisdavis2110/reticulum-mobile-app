@@ -13,12 +13,13 @@
 //    observed by small per-screen observers (same shape as
 //    `ConversationObserver`).
 //
-// The Rooms tab only appears when the `experimental.rrc` toggle is on
+// Rooms tab — IRC-style group chat over Reticulum Relay Chat hubs.
 // (see ContentView). The shared RRC engine is wired on iOS via
 // IosEngineFactory; the Kotlin↔Swift bridge is in IosEngineFactory.kt.
 
 import Shared
 import SwiftUI
+import UIKit
 
 /// Navigation value for a room-chat push. A plain struct (not the
 /// Kotlin StoredRrcRoom) so it is cleanly Hashable for NavigationPath.
@@ -34,64 +35,26 @@ struct RoomsView: View {
     @State private var path = NavigationPath()
     @State private var showAddHub = false
     @State private var pendingDelete: StoredRrcHub?
+    @State private var discoveredSearch = ""
 
     var body: some View {
         NavigationStack(path: $path) {
-            Group {
-                if store.rrcHubs.isEmpty {
-                    ContentUnavailableView {
-                        Label("No RRC hubs", systemImage: "bubble.left.and.bubble.right")
-                    } description: {
-                        Text("Tap + to add a hub by its destination hash, or promote an rrc.hub from the Nodes tab.")
-                    }
-                } else {
-                    List {
-                        // Tap opens the hub; long-press deletes it
-                        // (→ confirm dialog) — no inline trash button
-                        // (docs/REDESIGN.md §6).
-                        ForEach(store.rrcHubs, id: \.destHash) { hub in
-                            RrcHubRow(hub: hub, state: store.rrcHubStates[hub.destHash])
-                                .contentShape(Rectangle())
-                                .onTapGesture { path.append(hub.destHash as String) }
-                                .onLongPressGesture(minimumDuration: 0.4) { pendingDelete = hub }
-                        }
-                    }
-                    .listStyle(.plain)
-                }
-            }
-            .navigationTitle("Rooms")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showAddHub = true } label: { Image(systemName: "plus") }
-                }
-            }
-            .navigationDestination(for: String.self) { hubHash in
-                if let hub = store.rrcHubs.first(where: { $0.destHash == hubHash }) {
-                    RrcHubDetailView(hub: hub, path: $path)
-                } else {
-                    ContentUnavailableView(
-                        "Hub not found",
-                        systemImage: "questionmark.circle",
-                        description: Text("This hub is no longer in the local store.")
-                    )
-                }
-            }
-            .navigationDestination(for: RoomRef.self) { ref in
-                if let hub = store.rrcHubs.first(where: { $0.destHash == ref.hubHash }) {
-                    RrcRoomChatView(hub: hub, room: ref.room)
-                } else {
-                    ContentUnavailableView(
-                        "Hub not found",
-                        systemImage: "questionmark.circle",
-                        description: Text("This hub is no longer in the local store.")
-                    )
-                }
-            }
+            hubListContent
+                .navigationTitle("Rooms")
+                .toolbar { roomsToolbar }
+                .navigationDestination(for: String.self, destination: hubDetailDestination)
+                .navigationDestination(for: RoomRef.self, destination: roomChatDestination)
         }
         .sheet(isPresented: $showAddHub) {
-            AddRrcHubSheet { hash, name, nick in
-                store.addRrcHub(destHash: hash, displayName: name, nick: nick)
-            }
+            AddRrcHubSheet(
+                discovered: store.discoverableRrcHubs,
+                onAdd: { hash, name, nick in
+                    store.addRrcHub(destHash: hash, displayName: name, nick: nick)
+                },
+                onAddDiscovered: { dest in
+                    addDiscoveredHub(dest)
+                }
+            )
         }
         // Open-RRC-hub deep-link from a destination detail sheet or
         // any other path that hands a hub hash to the store. ContentView
@@ -118,6 +81,127 @@ struct RoomsView: View {
             Text("Removes \(hub.displayName.isEmpty ? "this hub" : hub.displayName) and all its room history from this device.")
         }
     }
+
+    @ViewBuilder
+    private var hubListContent: some View {
+        if store.rrcHubs.isEmpty && store.discoverableRrcHubs.isEmpty {
+            ContentUnavailableView {
+                Label("No RRC hubs", systemImage: "bubble.left.and.bubble.right")
+            } description: {
+                Text("When a hub announces on the network it'll appear here to add in one tap — or tap + to add by destination hash.")
+            } actions: {
+                Button("Add by hash") { showAddHub = true }
+            }
+        } else {
+            hubsList
+        }
+    }
+
+    private var filteredDiscovered: [StoredDestination] {
+        let q = discoveredSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return store.discoverableRrcHubs }
+        return store.discoverableRrcHubs.filter { d in
+            d.effectiveDisplayName.lowercased().contains(q) ||
+                d.displayName.lowercased().contains(q) ||
+                (d.appLabel?.lowercased().contains(q) ?? false) ||
+                d.hash.lowercased().contains(q)
+        }
+    }
+
+    private var hubsList: some View {
+        VStack(spacing: 0) {
+            if !store.discoverableRrcHubs.isEmpty {
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search discovered hubs", text: $discoveredSearch)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    if !discoveredSearch.isEmpty {
+                        Button { discoveredSearch = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.bar)
+            }
+            List {
+                if !store.rrcHubs.isEmpty {
+                    Section("My hubs") {
+                        ForEach(store.rrcHubs, id: \.destHash) { hub in
+                            RrcHubRow(hub: hub, state: store.rrcHubStates[hub.destHash])
+                                .contentShape(Rectangle())
+                                .onTapGesture { path.append(hub.destHash as String) }
+                                .onLongPressGesture(minimumDuration: 0.4) { pendingDelete = hub }
+                        }
+                    }
+                }
+                if !store.discoverableRrcHubs.isEmpty {
+                    Section("Discovered on the network") {
+                        if filteredDiscovered.isEmpty {
+                            Text("No hubs match “\(discoveredSearch)”.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(filteredDiscovered, id: \.id) { dest in
+                                DiscoveredRrcHubRow(dest: dest) {
+                                    addDiscoveredHub(dest)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .scrollDismissesKeyboard(.immediately)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var roomsToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Button { showAddHub = true } label: { Image(systemName: "plus") }
+        }
+    }
+
+    @ViewBuilder
+    private func hubDetailDestination(hubHash: String) -> some View {
+        if let hub = store.rrcHubs.first(where: { $0.destHash == hubHash }) {
+            RrcHubDetailView(hub: hub, path: $path)
+        } else {
+            ContentUnavailableView(
+                "Hub not found",
+                systemImage: "questionmark.circle",
+                description: Text("This hub is no longer in the local store.")
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func roomChatDestination(ref: RoomRef) -> some View {
+        if let hub = store.rrcHubs.first(where: { $0.destHash == ref.hubHash }) {
+            RrcRoomChatView(hub: hub, room: ref.room)
+        } else {
+            ContentUnavailableView(
+                "Hub not found",
+                systemImage: "questionmark.circle",
+                description: Text("This hub is no longer in the local store.")
+            )
+        }
+    }
+
+    private func addDiscoveredHub(_ dest: StoredDestination) {
+        let hash = dest.hash as String
+        let name = dest.effectiveDisplayName
+        store.addRrcHub(
+            destHash: hash,
+            displayName: name.isEmpty ? (dest.appLabel ?? "RRC hub") : name,
+            nick: nil
+        )
+    }
 }
 
 private struct RrcHubRow: View {
@@ -126,9 +210,6 @@ private struct RrcHubRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Circle()
-                .fill(dotColor)
-                .frame(width: 10, height: 10)
             VStack(alignment: .leading, spacing: 2) {
                 Text(hub.displayName.isEmpty ? "(unnamed hub)" : hub.displayName)
                     .font(.body)
@@ -145,12 +226,6 @@ private struct RrcHubRow: View {
         }
     }
 
-    private var dotColor: Color {
-        if state?.welcomed == true { return .green }
-        if state?.connecting == true { return .orange }
-        return .secondary
-    }
-
     private var statusLabel: String {
         if state?.welcomed == true { return "Connected" }
         if state?.connecting == true { return "Connecting…" }
@@ -158,11 +233,57 @@ private struct RrcHubRow: View {
     }
 }
 
+private struct DiscoveredRrcHubRow: View {
+    let dest: StoredDestination
+    let onAdd: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayName)
+                    .font(.body)
+                Text(shortHash(dest.hash as String))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if !meta.isEmpty {
+                    Text(meta)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button("Add", action: onAdd)
+                .buttonStyle(.bordered)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onAdd)
+    }
+
+    private var displayName: String {
+        let name = dest.effectiveDisplayName
+        if !name.isEmpty { return name }
+        return dest.appLabel ?? "(unnamed hub)"
+    }
+
+    private var meta: String {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let ageMs = max(0, now - dest.lastSeen)
+        var parts: [String] = []
+        if dest.hopCount > 0 { parts.append("\(dest.hopCount) hop\(dest.hopCount == 1 ? "" : "s")") }
+        if let r = dest.rssi { parts.append("RSSI \(Int(truncating: r)) dBm") }
+        if dest.lastSeen > 0 { parts.append("seen \(relativeAge(ageMs))") }
+        return parts.joined(separator: " · ")
+    }
+}
+
 // ---- add-hub sheet ----------------------------------------------------
 
 private struct AddRrcHubSheet: View {
+    let discovered: [StoredDestination]
     /// (destHash, displayName, nick?) — nick is nil when left blank.
     let onAdd: (String, String, String?) -> Void
+    let onAddDiscovered: (StoredDestination) -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var hash = ""
@@ -180,42 +301,60 @@ private struct AddRrcHubSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Hub destination hash") {
-                    TextField("32 hex characters", text: $hash)
-                        .font(.body.monospaced())
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                }
-                Section("Display") {
-                    TextField("Hub name (optional)", text: $name)
-                    TextField("Your nick (optional)", text: $nick)
-                }
-                Section {
-                    Text("The nick is the name shown next to your messages on this hub. You can change it later from the hub screen.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle("Add RRC hub")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        let display = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                        onAdd(
-                            cleanedHash,
-                            display.isEmpty ? "RRC hub" : display,
-                            nick.isEmpty ? nil : nick,
-                        )
-                        dismiss()
+            addHubForm
+                .navigationTitle("Add RRC hub")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { addHubToolbar }
+        }
+    }
+
+    @ViewBuilder
+    private var addHubForm: some View {
+        Form {
+            if !discovered.isEmpty {
+                Section("Discovered on the network") {
+                    ForEach(discovered, id: \.id) { dest in
+                        DiscoveredRrcHubRow(dest: dest) {
+                            onAddDiscovered(dest)
+                            dismiss()
+                        }
                     }
-                    .disabled(!validHash)
                 }
             }
+            Section(discovered.isEmpty ? "Hub destination hash" : "Or add by hash") {
+                TextField("32 hex characters", text: $hash)
+                    .font(.body.monospaced())
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+            Section("Display") {
+                TextField("Hub name (optional)", text: $name)
+                TextField("Your nick (optional)", text: $nick)
+            }
+            Section {
+                Text("The nick is the name shown next to your messages on this hub. You can change it later from the hub screen.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var addHubToolbar: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            Button("Cancel") { dismiss() }
+        }
+        ToolbarItem(placement: .confirmationAction) {
+            Button("Add") {
+                let display = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                onAdd(
+                    cleanedHash,
+                    display.isEmpty ? "RRC hub" : display,
+                    nick.isEmpty ? nil : nick,
+                )
+                dismiss()
+            }
+            .disabled(!validHash)
         }
     }
 }
@@ -233,6 +372,7 @@ struct RrcHubDetailView: View {
     @State private var showEditNick = false
     @State private var nickDraft = ""
     @State private var pendingRoomDelete: StoredRrcRoom?
+    @State private var hashCopied = false
 
     private var state: RrcHubState? { store.rrcHubStates[hub.destHash] }
     private var welcomed: Bool { state?.welcomed == true }
@@ -320,11 +460,24 @@ struct RrcHubDetailView: View {
 
     private var connectionRow: some View {
         HStack(spacing: 10) {
-            Text(shortHash(hub.destHash))
+            Text(hub.destHash as String)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Spacer()
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Button {
+                UIPasteboard.general.string = hub.destHash as String
+                hashCopied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { hashCopied = false }
+            } label: {
+                Image(systemName: hashCopied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 14))
+                    .foregroundStyle(hashCopied ? Color.green : Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(hashCopied ? "Copied" : "Copy hub ID")
+            Spacer(minLength: 8)
             if welcomed {
                 Button("Disconnect") { store.closeRrcSession(hubHash: hub.destHash) }
                     .buttonStyle(.bordered)
@@ -496,6 +649,7 @@ struct RrcRoomChatView: View {
 
     @StateObject private var observer = RrcRoomMessagesObserver()
     @State private var draft = ""
+    @FocusState private var composeFocused: Bool
 
     private var state: RrcHubState? { store.rrcHubStates[hub.destHash] }
 
@@ -523,12 +677,29 @@ struct RrcRoomChatView: View {
                         withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
                 }
+                .onChange(of: composeFocused) { _, focused in
+                    guard focused, let last = observer.messages.last else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
+                }
+                .onReceive(
+                    NotificationCenter.default.publisher(
+                        for: UIResponder.keyboardWillShowNotification
+                    )
+                ) { _ in
+                    guard let last = observer.messages.last else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
+                }
             }
             Divider()
             HStack {
                 TextField("Message #\(room)", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...4)
+                    .focused($composeFocused)
                 Button {
                     store.sendRrcMessage(hubHash: hub.destHash, room: room, text: draft)
                     draft = ""
@@ -545,7 +716,9 @@ struct RrcRoomChatView: View {
         }
         .navigationTitle("#\(room)")
         .navigationBarTitleDisplayMode(.inline)
-        .keyboardDoneToolbar()
+        // No `.keyboardDoneToolbar()` — that accessory bar covered the
+        // compose row / Send button. Scroll-to-dismiss + Send already
+        // cover keyboard exit.
         .toolbar {
             // Rejoin escape hatch — re-sends a JOIN against the hub
             // without leaving the room first. Useful when the engine's
@@ -601,7 +774,6 @@ private struct RrcMessageBubble: View {
                         .foregroundStyle(Color.accentColor)
                 }
                 Text(msg.text)
-                    .textSelection(.enabled)
                     .foregroundStyle(outgoing ? .white : .primary)
                 Text(timeLabel)
                     .font(.caption2)

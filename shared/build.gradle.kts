@@ -107,6 +107,10 @@ kotlin {
                 packageName("io.github.thatsfguy.reticulum.codec.cinterop.opus")
                 includeDirs(rootProject.file("third_party/opus/include"))
             }
+            create("ifaddrs") {
+                defFile(project.file("src/nativeInterop/cinterop/ifaddrs.def"))
+                packageName("io.github.thatsfguy.reticulum.transport.cinterop.ifaddrs")
+            }
         }
     }
 

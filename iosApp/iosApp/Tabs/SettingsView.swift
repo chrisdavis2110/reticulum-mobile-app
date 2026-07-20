@@ -10,22 +10,23 @@ import CoreBluetooth
 import CoreImage.CIFilterBuiltins
 import Shared
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// Settings is a grouped index that drills into focused sub-screens
 /// (docs/REDESIGN.md §6) — the iOS-Settings model. Each case is one
 /// sub-screen pushed onto the NavigationStack.
 enum SettingsRoute: Hashable {
-    case connection, identity, features, privacy, appearance, about
+    case connection, identity, privacy, notifications, appearance, about
 
     var title: String {
         switch self {
-        case .connection: return "Connection"
-        case .identity:   return "Identity"
-        case .features:   return "Features"
-        case .privacy:    return "Privacy & security"
-        case .appearance: return "Appearance"
-        case .about:      return "About & diagnostics"
+        case .connection:    return "Connection"
+        case .identity:      return "Identity"
+        case .privacy:       return "Privacy & security"
+        case .notifications: return "Notifications"
+        case .appearance:    return "Appearance"
+        case .about:         return "About & diagnostics"
         }
     }
 }
@@ -80,8 +81,8 @@ struct SettingsView: View {
                 indexRow(.connection,
                          subtitle: anyConnected ? "Connected" : "Tap to connect a transport")
                 indexRow(.identity, subtitle: "Keys, display name, backup & QR")
-                indexRow(.features, subtitle: "NomadNet browser & Relay Chat")
                 indexRow(.privacy, subtitle: "Message verification & safety")
+                indexRow(.notifications, subtitle: "Alerts, sound, and per-tab toggles")
                 indexRow(.appearance, subtitle: "Theme — light, dark or system")
                 indexRow(.about, subtitle: "Version, diagnostics log, links")
             }
@@ -131,10 +132,11 @@ struct SettingsView: View {
             Form {
                 statusSection
                 savedNodesSection
-                bleSection
+                autoInterfaceSection
                 tcpSection
-                connectivitySection
+                bleSection
                 radioConfigSection
+                connectivitySection
                 propagationSection
             }
             // Swiping the form resigns first responder, matching
@@ -164,13 +166,13 @@ struct SettingsView: View {
                 } message: {
                     Text("Generates a new keypair and a new destination hash. Anyone who knew your old hash will need to see a fresh announce from you. Contacts and message history stay on this device.")
                 }
-        case .features:
-            Form { featuresSection }
-                .navigationTitle("Features")
-                .navigationBarTitleDisplayMode(.inline)
         case .privacy:
             Form { privacySection }
                 .navigationTitle("Privacy & security")
+                .navigationBarTitleDisplayMode(.inline)
+        case .notifications:
+            Form { notificationsSection }
+                .navigationTitle("Notifications")
                 .navigationBarTitleDisplayMode(.inline)
         case .appearance:
             Form { appearanceSection }
@@ -316,16 +318,36 @@ struct SettingsView: View {
             }
             .padding(.vertical, 4)
 
+            if let last = lastSavedBleNode {
+                Text("Last: \(last.name?.isEmpty == false ? last.name! : "(unnamed)") · \(shortHash(last.address))")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+
             if isBleConnected {
                 Button(role: .destructive) { store.disconnectBle() } label: {
-                    Label("Disconnect BLE", systemImage: "xmark.circle")
+                    Label("Disconnect RNode", systemImage: "xmark.circle")
+                }
+            } else if isBleConnecting {
+                Button(role: .destructive) { store.disconnectBle() } label: {
+                    Label("Cancel connect", systemImage: "xmark.circle")
                 }
             } else {
+                if let last = lastSavedBleNode {
+                    Button { store.connectSaved(last) } label: {
+                        Label("Connect RNode", systemImage: "antenna.radiowaves.left.and.right")
+                    }
+                }
                 Button {
                     bleScanner.startScan()
                     showBleScanner = true
                 } label: {
-                    Label("Add node", systemImage: "antenna.radiowaves.left.and.right")
+                    Label(
+                        lastSavedBleNode == nil ? "Connect RNode" : "Scan for another",
+                        systemImage: lastSavedBleNode == nil
+                            ? "antenna.radiowaves.left.and.right"
+                            : "magnifyingglass"
+                    )
                 }
             }
             Text("Bluetooth Low Energy attach to a local RNode advertising the Nordic UART Service. The RNode bridges to the LoRa RF mesh.")
@@ -336,6 +358,45 @@ struct SettingsView: View {
 
     private var isBleConnected: Bool {
         store.connections.contains { $0.kind == .ble && $0.transport == .connected }
+    }
+
+    private var isBleConnecting: Bool {
+        store.connections.contains { $0.kind == .ble && $0.transport == .connecting }
+    }
+
+    /// Most-recent BLE RNode from Saved nodes / cold-start memory.
+    private var lastSavedBleNode: SavedNodeEntry? {
+        store.savedNodes.first { $0.kind == "ble" }
+    }
+
+    // ---- AutoInterface (LAN) -----------------------------------------
+
+    private var autoInterfaceSection: some View {
+        Section {
+            Text(
+                "Discovers Reticulum nodes on the same Wi‑Fi via IPv6 multicast. "
+                + "Interops with desktop rnsd configured with `type = AutoInterface`. "
+                + "Traffic stays on your LAN — no remote transport operator."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if isAutoInterfaceConnected {
+                Button(role: .destructive) { store.disconnectAutoInterface() } label: {
+                    Label("Disconnect AutoInterface", systemImage: "xmark.circle")
+                }
+            } else {
+                Button { store.connectAutoInterface() } label: {
+                    Label("Connect AutoInterface", systemImage: "wifi")
+                }
+            }
+        } header: {
+            Text("Local network (AutoInterface)")
+        }
+    }
+
+    private var isAutoInterfaceConnected: Bool {
+        store.connections.contains { $0.kind == .autointerface && $0.transport == .connected }
     }
 
     // ---- TCP transport -------------------------------------------------
@@ -463,10 +524,12 @@ struct SettingsView: View {
             // @AppStorage so the engine's displayNameProvider closure
             // (set in ReticulumStore.init) reads the same key on the
             // next announce. "Save" persists + triggers an immediate
-            // re-announce so peers don't have to wait for the 5-min
+            // re-announce so peers don't have to wait for the periodic
             // auto-announce. Mirrors the Android Identity → Display
             // name TextField.
             DisplayNameField()
+
+            AnnounceIntervalPicker()
 
             // Identity actions: announce, show QR card to share with
             // peers, hard-reset. Mirrors the Android Settings →
@@ -487,10 +550,6 @@ struct SettingsView: View {
                 showResetIdentityConfirm = true
             } label: { Label("Reset identity…", systemImage: "arrow.counterclockwise") }
                 .buttonStyle(.bordered)
-
-            Text("An announce is sent automatically every 5 minutes while connected. Share your QR card so peers can add you without typing the 32-character hash.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
             // Identity backup — passphrase-encrypted .rmid archive,
             // wire-compatible with the Android export/import. Saving via
@@ -708,48 +767,88 @@ struct SettingsView: View {
         }
     }
 
-    // ---- Features ------------------------------------------------------
+    // ---- Notifications -------------------------------------------------
 
-    /// Opt-in NomadNet browser. Default off — when enabled a Nomad tab
-    /// appears in the bottom bar. Mirrors the Android `nomadEnabled`
-    /// preference; the key is shared with ContentView's nav gate.
-    @AppStorage("feature.nomad") private var nomadEnabled: Bool = false
+    @AppStorage("notifications.enabled") private var notificationsEnabled: Bool = true
+    @AppStorage("notifications.messagesEnabled") private var notificationsMessages: Bool = true
+    @AppStorage("notifications.roomsEnabled") private var notificationsRooms: Bool = false
+    @AppStorage("notifications.nomadEnabled") private var notificationsNomad: Bool = false
+    @AppStorage("notifications.soundEnabled") private var notificationsSound: Bool = true
+    @AppStorage("notifications.badgeEnabled") private var notificationsBadge: Bool = true
 
-    /// Off by default. RRC (Reticulum Relay Chat) is a new wire protocol
-    /// still under development — gated so it stays invisible to ordinary
-    /// users until it's interop-verified. Mirrors the Android
-    /// `experimental_rrc` preference.
-    @AppStorage("experimental.rrc") private var experimentalRrc: Bool = false
-
-    /// Both opt-in feature toggles, each with a short discovery blurb
-    /// (docs/REDESIGN.md §6 — the Features screen carries the
-    /// discovery weight). Enabling either adds its tab to the bar.
-    private var featuresSection: some View {
-        Section("Features") {
-            Toggle(isOn: $nomadEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("NomadNet browser")
-                    Text(
-                        "Browse NomadNet node pages over Reticulum — the "
-                        + "in-app Micron-markup viewer. When ON, a Nomad tab "
-                        + "appears in the bottom bar."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+    private var notificationsSection: some View {
+        Group {
+            Section {
+                Toggle(isOn: $notificationsEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Allow notifications")
+                        Text("Master switch for all Reticulum alerts. When off, nothing is posted to Notification Center.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: notificationsEnabled) { _, on in
+                    if on {
+                        IosNotifications.shared.requestAuthorizationIfNeeded()
+                    } else {
+                        IosNotifications.shared.setBadge(0)
+                    }
                 }
             }
-            Toggle(isOn: $experimentalRrc) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Reticulum Relay Chat")
-                    Text(
-                        "IRC-style group chat over Reticulum hubs. In active "
-                        + "development and not yet interop-verified — enable only "
-                        + "to help test it. When ON, a Rooms tab appears in the "
-                        + "bottom bar."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+
+            Section {
+                Toggle("Messages", isOn: $notificationsMessages)
+                    .disabled(!notificationsEnabled)
+                Toggle(isOn: $notificationsRooms) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Rooms")
+                        Text("Relay Chat hub and room activity. Alerts for Rooms are not posted yet; this stores your preference for when they are.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .disabled(!notificationsEnabled)
+                Toggle(isOn: $notificationsNomad) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Nomad")
+                        Text("NomadNet page and node activity. Alerts for Nomad are not posted yet; this stores your preference for when they are.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!notificationsEnabled)
+            } header: {
+                Text("Tabs")
+            } footer: {
+                Text("Only Messages posts system notifications today. Rooms and Nomad toggles are ready for when those alerts ship.")
+            }
+
+            Section("Sound & badge") {
+                Toggle("Play sound", isOn: $notificationsSound)
+                    .disabled(!notificationsEnabled)
+                Toggle(isOn: $notificationsBadge) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("App icon badge")
+                        Text("Show an unread count on the home-screen icon.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!notificationsEnabled)
+                .onChange(of: notificationsBadge) { _, on in
+                    if !on { IosNotifications.shared.setBadge(0) }
+                    else { Task { await store.recomputeUnreadBadge() } }
+                }
+            }
+
+            Section {
+                Button("Open system notification settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+            } footer: {
+                Text("Use iOS Settings to grant or revoke permission, and to change banner style for Reticulum.")
             }
         }
     }
@@ -1053,6 +1152,38 @@ private struct PropagationNodePicker: View {
     }
 }
 
+// MARK: - Auto announce interval
+
+private struct AnnounceIntervalPicker: View {
+    @AppStorage("announce.intervalMs") private var intervalMs: Int = 3_600_000
+
+    private var options: [(ms: Int, label: String)] {
+        [
+            (0, "Off (manual only)"),
+            (300_000, "Every 5 minutes"),
+            (900_000, "Every 15 minutes"),
+            (1_800_000, "Every 30 minutes"),
+            (3_600_000, "Every hour"),
+            (7_200_000, "Every 2 hours"),
+            (14_400_000, "Every 4 hours"),
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Auto announce", selection: $intervalMs) {
+                ForEach(options, id: \.ms) { opt in
+                    Text(opt.label).tag(opt.ms)
+                }
+            }
+            .pickerStyle(.menu)
+            Text(AnnounceIntervalPresets.shared.summaryFor(ms: Int64(intervalMs)))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 // MARK: - Display name editor
 
 /// Editable display-name TextField. The persisted name lands in the
@@ -1111,13 +1242,13 @@ private struct DisplayNameField: View {
 /// Five-field form bound to UserDefaults via @AppStorage. The store's
 /// `currentRadioConfig` snapshots the same keys at BLE connect /
 /// reapply time, so what's saved here is what the RNode receives.
-/// Defaults match Android's RadioConfig.kt defaults (US 902-928 ISM,
-/// 250 kHz BW, SF 10 for range, CR 4/5, +22 dBm TX).
+/// Defaults match Android's RadioConfig.kt defaults (914.875 MHz,
+/// 125 kHz BW, SF 7, CR 4/6, +22 dBm TX).
 private struct RadioConfigForm: View {
-    @AppStorage("radio.frequencyHz")    private var freqHz: Int = 904_375_000
-    @AppStorage("radio.bandwidthHz")    private var bwHz: Int = 250_000
-    @AppStorage("radio.spreadingFactor") private var sf: Int = 10
-    @AppStorage("radio.codingRate")      private var cr: Int = 5
+    @AppStorage("radio.frequencyHz")    private var freqHz: Int = 914_875_000
+    @AppStorage("radio.bandwidthHz")    private var bwHz: Int = 125_000
+    @AppStorage("radio.spreadingFactor") private var sf: Int = 7
+    @AppStorage("radio.codingRate")      private var cr: Int = 6
     @AppStorage("radio.txPowerDbm")      private var txp: Int = 22
 
     /// Editable text views over the persisted Int values. Track these

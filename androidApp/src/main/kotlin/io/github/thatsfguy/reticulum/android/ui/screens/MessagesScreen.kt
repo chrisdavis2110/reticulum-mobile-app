@@ -25,11 +25,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,6 +39,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
@@ -63,6 +66,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
@@ -81,6 +85,7 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.engine.AudioMode
 import io.github.thatsfguy.reticulum.engine.audioExtension
 import io.github.thatsfguy.reticulum.engine.ImageResolutionTier
+import io.github.thatsfguy.reticulum.store.ConversationPreview
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.util.avatarColors
@@ -99,6 +104,7 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
     val allDestinations by viewModel.allDestinations.collectAsState(initial = emptyList())
     val selectedHash by viewModel.selectedDestination.collectAsState()
     val unreadCounts by viewModel.unreadCounts.collectAsState(initial = emptyMap())
+    val latestMessages by viewModel.latestMessages.collectAsState(initial = emptyMap())
     // Fall back to the global destinations list when the selected hash
     // isn't in the conversation list — e.g. the user just tapped a row
     // on the Nodes tab to start a chat with a peer they've never
@@ -110,12 +116,14 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
     var pendingNodeDelete by remember { mutableStateOf<StoredDestination?>(null) }
     var detailDest by remember { mutableStateOf<StoredDestination?>(null) }
     var pendingRename by remember { mutableStateOf<StoredDestination?>(null) }
+    var showNodeList by remember { mutableStateOf(false) }
 
     if (selected == null) {
         ThreadsList(
             conversations = conversations,
             pinned = pinned,
             unreadCounts = unreadCounts,
+            latestMessages = latestMessages,
             search = search,
             onSearch = { viewModel.setMessageSearch(it) },
             onSync = { viewModel.syncPropagationAuto() },
@@ -123,13 +131,19 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             syncResult = propagationSyncResult,
             onPick = { hash -> viewModel.selectDestination(hash) },
             onShowDetail = { dest -> detailDest = dest },
+            onShowNodeList = { showNodeList = true },
         )
     } else {
         // System back / predictive-back returns to the conversation list
         // instead of falling through to the NavHost (which would leave the
         // Messages tab / exit the app). Issue #23.
         BackHandler { viewModel.selectDestination(null) }
-        ConversationView(viewModel, selected, onBack = { viewModel.selectDestination(null) })
+        ConversationView(
+            viewModel,
+            selected,
+            onBack = { viewModel.selectDestination(null) },
+            onShowContactInfo = { detailDest = selected },
+        )
     }
 
     // Long-pressing a thread row opens the shared detail sheet.
@@ -147,6 +161,19 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
         )
     }
 
+    if (showNodeList) {
+        TabNodeListDialog(
+            kind = TabNodeKind.Messagable,
+            destinations = allDestinations,
+            onDismiss = { showNodeList = false },
+            onSelect = { dest -> viewModel.selectDestination(dest.hash) },
+            onAddManual = { hash, label -> viewModel.addManualDestination(hash, label) },
+            onToggleContact = { dest ->
+                viewModel.toggleFavorite(dest.hash, !dest.favorite)
+            },
+        )
+    }
+
     pendingNodeDelete?.let { dest ->
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { pendingNodeDelete = null },
@@ -154,7 +181,7 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             text = {
                 Text(
                     "Removes ${dest.effectiveDisplayName.ifBlank { "(unnamed)" }} from local storage along with " +
-                        "all message history. If they announce again later they'll reappear in Nodes " +
+                        "all message history. If they announce again later they'll reappear in Contacts " +
                         "(without prior history).",
                 )
             },
@@ -225,6 +252,7 @@ private fun ThreadsList(
     conversations: List<StoredDestination>,
     pinned: Set<String>,
     unreadCounts: Map<String, Int>,
+    latestMessages: Map<String, ConversationPreview>,
     search: String,
     onSearch: (String) -> Unit,
     onSync: () -> Unit,
@@ -232,6 +260,7 @@ private fun ThreadsList(
     syncResult: String?,
     onPick: (String) -> Unit,
     onShowDetail: (StoredDestination) -> Unit,
+    onShowNodeList: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -254,6 +283,13 @@ private fun ThreadsList(
                 shape = RoundedCornerShape(20.dp),
                 modifier = Modifier.weight(1f),
             )
+            IconButton(onClick = onShowNodeList) {
+                Icon(
+                    Icons.AutoMirrored.Filled.List,
+                    contentDescription = "Contacts",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
             // Pull queued messages from a propagation node (auto-picks
             // the best one). Shows a spinner while the sync runs.
             IconButton(onClick = onSync, enabled = !syncing) {
@@ -285,7 +321,7 @@ private fun ThreadsList(
             } else {
                 EmptyState(
                     Icons.Default.Email,
-                    "No conversations yet — open a node on the Nodes tab and tap Message.",
+                    "No conversations yet — tap the list icon to browse messageable contacts.",
                 )
             }
         } else {
@@ -296,14 +332,26 @@ private fun ThreadsList(
                 if (pinnedRows.isNotEmpty()) {
                     item("pinned_header") { SectionHeader("Pinned") }
                     items(pinnedRows, key = { "p-${it.hash}" }) { dest ->
-                        ThreadRow(dest, unreadCounts[dest.hash] ?: 0, onPick, onShowDetail)
+                        ThreadRow(
+                            dest,
+                            latestMessages[dest.hash],
+                            unreadCounts[dest.hash] ?: 0,
+                            onPick,
+                            onShowDetail,
+                        )
                     }
                     if (rest.isNotEmpty()) {
                         item("recent_header") { SectionHeader("Recent") }
                     }
                 }
                 items(rest, key = { "r-${it.hash}" }) { dest ->
-                    ThreadRow(dest, unreadCounts[dest.hash] ?: 0, onPick, onShowDetail)
+                    ThreadRow(
+                        dest,
+                        latestMessages[dest.hash],
+                        unreadCounts[dest.hash] ?: 0,
+                        onPick,
+                        onShowDetail,
+                    )
                 }
             }
         }
@@ -324,6 +372,7 @@ private fun SectionHeader(title: String) {
 @Composable
 private fun ThreadRow(
     dest: StoredDestination,
+    latestMessage: ConversationPreview?,
     unreadCount: Int,
     onPick: (String) -> Unit,
     onShowDetail: (StoredDestination) -> Unit,
@@ -351,10 +400,10 @@ private fun ThreadRow(
             // distinct unnamed peers look identical.
             Text(messagesContactName(dest), style = MaterialTheme.typography.titleMedium)
             Text(
-                shortHash(dest.hash),
+                messagePreview(latestMessage),
                 style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
             )
         }
         if (unreadCount > 0) UnreadBadge(unreadCount)
@@ -392,8 +441,27 @@ private fun messagesContactName(dest: StoredDestination): String {
     return name
 }
 
+private val previewWhitespace = Regex("\\s+")
+
+private fun messagePreview(message: ConversationPreview?): String {
+    message ?: return "No messages yet"
+    val body = when {
+        message.content.isNotEmpty() -> message.content.replace(previewWhitespace, " ").trim()
+        message.hasImage -> "📷 Photo"
+        message.audioMode != null -> "🎤 Voice message"
+        message.hasFile -> "📎 ${message.attachmentName ?: "File"}"
+        else -> "Message"
+    }
+    return if (message.direction == "outgoing") "You: $body" else body
+}
+
 @Composable
-private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestination, onBack: () -> Unit) {
+private fun ConversationView(
+    viewModel: ReticulumViewModel,
+    dest: StoredDestination,
+    onBack: () -> Unit,
+    onShowContactInfo: () -> Unit,
+) {
     val messages by viewModel.messagesForSelected.collectAsState(initial = emptyList())
     // Seeded from the ViewModel's retained draft so text typed before
     // leaving the conversation comes back (issue #23). Re-keyed on
@@ -541,16 +609,26 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             Modifier.fillMaxWidth().padding(14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Text(
+                "←",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier
+                    .clickable(onClick = onBack)
+                    .padding(end = 12.dp),
+            )
             Row(
-                modifier = Modifier.weight(1f).clickable(onClick = onBack),
+                modifier = Modifier.weight(1f).clickable(onClick = onShowContactInfo),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("← ", style = MaterialTheme.typography.titleMedium)
                 Avatar(label = dest.effectiveDisplayName.ifBlank { dest.hash.take(2) }, seed = dest.hash)
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(messagesContactName(dest), style = MaterialTheme.typography.titleMedium)
-                    Text(dest.hash, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                    Text(
+                        "Contact info",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
             androidx.compose.material3.TextButton(
@@ -674,6 +752,15 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             }
         }
 
+        // When the IME opens, the LazyColumn shrinks via imePadding —
+        // re-pin to the newest message so it stays above the composer.
+        val imeBottom = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current)
+        LaunchedEffect(imeBottom > 0) {
+            if (imeBottom > 0 && bubbles.isNotEmpty()) {
+                listState.animateScrollToItem(0)
+            }
+        }
+
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
             state = listState,
@@ -713,6 +800,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                     sendProgressPercent = resourceProgress[msg.id],
                     onShowInfo = { infoMessage = msg },
                     onDelete = { pendingDeleteMessage = msg },
+                    onResend = { viewModel.resendMessage(msg) },
                 )
             }
         }
@@ -976,14 +1064,9 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     }
 }
 
-/** Signal-style tap-back palette. Six emoji is the sweet spot —
- *  enough breadth that the user usually finds the right one without
- *  drilling into a full picker, but small enough to render inline
- *  on a narrow phone without scrolling. Order is by rough usage
- *  frequency: thumb / heart for affirmation, laugh / surprise / sad
- *  for reactions to content, hands as a generic acknowledgement. */
+/** Compact tap-back palette: like, heart, dislike, laugh. */
 internal val REACTION_PALETTE: List<String> =
-    listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+    listOf("👍", "❤️", "👎", "😂")
 
 /** Compact human size for a file-attachment chip — "938 B" / "204 KB". */
 private fun fileSizeLabel(bytes: Int): String =
@@ -1299,6 +1382,8 @@ private fun MessageBubble(
     attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore? = null,
     /** Long-press → Delete. Local-only delete of this row (issue #23). */
     onDelete: () -> Unit = {},
+    /** Long-press → Resend. Re-sends an outgoing row's payload (issue). */
+    onResend: () -> Unit = {},
     /** Long-press → Info. Opens the metadata sheet for this row (#23). */
     onShowInfo: () -> Unit = {},
 ) {
@@ -1390,7 +1475,6 @@ private fun MessageBubble(
     //     messages — every reaction costs an LXMF round-trip, and
     //     self-reactions are a UX foot-gun without a clear use case)
     var showActions by remember(msg.id) { mutableStateOf(false) }
-    var showEmojiPicker by remember(msg.id) { mutableStateOf(false) }
     val canReact = msg.messageId != null && !outgoing
     val canCopy = msg.content.isNotEmpty()
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -1768,19 +1852,25 @@ private fun MessageBubble(
                 }
             }
         }
-        // Long-press actions popup. Anchored to the bubble's Box;
-        // dismisses on outside-tap. Shows a Copy action for any bubble
-        // carrying text, plus the six-emoji tap-back palette for
-        // reactable (incoming) messages.
+        // Long-press actions popup. Anchored above the bubble
+        // (measured height so it sits fully above, never below).
+        // Dismisses on outside-tap.
         if (showActions) {
+            var popupHeightPx by remember(msg.id) { mutableStateOf(0) }
             androidx.compose.ui.window.Popup(
                 alignment = Alignment.TopCenter,
-                offset = androidx.compose.ui.unit.IntOffset(0, -120),
+                offset = androidx.compose.ui.unit.IntOffset(
+                    0,
+                    -(popupHeightPx + 12).coerceAtLeast(120),
+                ),
                 onDismissRequest = { showActions = false },
                 properties = androidx.compose.ui.window.PopupProperties(focusable = true),
             ) {
                 Column(
                     modifier = Modifier
+                        .onGloballyPositioned { coords ->
+                            popupHeightPx = coords.size.height
+                        }
                         .background(
                             MaterialTheme.colorScheme.surface,
                             RoundedCornerShape(24.dp),
@@ -1798,7 +1888,7 @@ private fun MessageBubble(
                     // it can't push the text actions off-screen (#23).
                     if (canReact) {
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(0.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             for (emoji in REACTION_PALETTE) {
@@ -1809,26 +1899,10 @@ private fun MessageBubble(
                                             showActions = false
                                             onReact(emoji)
                                         }
-                                        .padding(8.dp),
-                                    style = MaterialTheme.typography.titleLarge,
+                                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                                    style = MaterialTheme.typography.titleMedium,
                                 )
                             }
-                            // Overflow into the full system emoji grid — the
-                            // wire format (REACTION_CONTENT, §5.9.8) accepts any
-                            // UTF-8, so senders aren't limited to the 6 quick
-                            // picks. Keeps the popup open conceptually; the
-                            // dialog handles the actual choice.
-                            Text(
-                                text = "＋",
-                                modifier = Modifier
-                                    .clickable {
-                                        showActions = false
-                                        showEmojiPicker = true
-                                    }
-                                    .padding(8.dp),
-                                style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
                         }
                     }
                     Row(
@@ -1842,6 +1916,19 @@ private fun MessageBubble(
                                     .clickable {
                                         showActions = false
                                         clipboard.setText(AnnotatedString(msg.content))
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                        if (outgoing) {
+                            Text(
+                                text = "Resend",
+                                modifier = Modifier
+                                    .clickable {
+                                        showActions = false
+                                        onResend()
                                     }
                                     .padding(horizontal = 10.dp, vertical = 8.dp),
                                 style = MaterialTheme.typography.labelLarge,
@@ -1872,34 +1959,6 @@ private fun MessageBubble(
                         )
                     }
                 }
-            }
-        }
-    }
-
-    // Full system emoji picker — the "+" overflow from the quick palette.
-    // EmojiPickerView (androidx.emoji2:emoji2-emojipicker) is a View that
-    // renders the entire emoji set with search + recents; host it via
-    // AndroidView in a Dialog. Any pick flows into the same onReact path
-    // as the quick palette — REACTION_CONTENT (SPEC §5.9.8) is arbitrary
-    // UTF-8, so nothing downstream cares the emoji came from the full grid.
-    if (showEmojiPicker) {
-        androidx.compose.ui.window.Dialog(onDismissRequest = { showEmojiPicker = false }) {
-            androidx.compose.material3.Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.fillMaxWidth().height(360.dp),
-            ) {
-                androidx.compose.ui.viewinterop.AndroidView(
-                    factory = { ctx ->
-                        androidx.emoji2.emojipicker.EmojiPickerView(ctx).apply {
-                            setOnEmojiPickedListener { picked ->
-                                showEmojiPicker = false
-                                onReact(picked.emoji)
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
             }
         }
     }

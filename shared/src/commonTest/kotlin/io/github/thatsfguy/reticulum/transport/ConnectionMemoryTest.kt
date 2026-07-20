@@ -216,10 +216,23 @@ class ConnectionMemoryTest {
     }
 
     @Test
+    fun resolveAllIncludesAutoInterfaceWhenRemembered() {
+        val resolved = resolveAll(
+            kinds = setOf(ConnectionMemory.KIND_AUTO_INTERFACE, ConnectionMemory.KIND_TCP),
+            tcpHost = "h",
+            tcpPort = 7822,
+        )
+        assertEquals(2, resolved.size)
+        assertTrue(resolved.contains(ConnectionMemory.AutoInterface))
+        assertTrue(resolved.contains(ConnectionMemory.Tcp("h", 7822)))
+    }
+
+    @Test
     fun kindPropertyRoundTripsTheConstants() {
         assertEquals(ConnectionMemory.KIND_BLE, ConnectionMemory.Ble("a", null).kind)
         assertEquals(ConnectionMemory.KIND_BT_CLASSIC, ConnectionMemory.BtClassic("a", null).kind)
         assertEquals(ConnectionMemory.KIND_TCP, ConnectionMemory.Tcp("h", 1).kind)
         assertEquals(ConnectionMemory.KIND_AGNOSTIC_LORA, ConnectionMemory.AgnosticLora("a", null, "9828F51B9828F51B9828F51B9828F51B").kind)
+        assertEquals(ConnectionMemory.KIND_AUTO_INTERFACE, ConnectionMemory.AutoInterface.kind)
     }
 }

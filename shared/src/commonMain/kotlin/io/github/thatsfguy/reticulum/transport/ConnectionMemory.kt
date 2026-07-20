@@ -53,11 +53,17 @@ sealed interface ConnectionMemory {
         override val kind: String get() = KIND_AGNOSTIC_LORA
     }
 
+    /** Parameterless LAN AutoInterface — no host/port to remember. */
+    data object AutoInterface : ConnectionMemory {
+        override val kind: String get() = KIND_AUTO_INTERFACE
+    }
+
     companion object {
         const val KIND_BLE = "ble"
         const val KIND_BT_CLASSIC = "btclassic"
         const val KIND_TCP = "tcp"
         const val KIND_AGNOSTIC_LORA = "agnosticlora"
+        const val KIND_AUTO_INTERFACE = "autointerface"
 
         /**
          * Resolve the transport to auto-reconnect on launch from the
@@ -172,6 +178,8 @@ sealed interface ConnectionMemory {
                         agnosticLoraUplink?.ifBlank { null },
                     )
                 }
+
+            KIND_AUTO_INTERFACE -> AutoInterface
 
             else -> null
         }

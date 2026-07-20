@@ -39,6 +39,8 @@ import io.github.thatsfguy.reticulum.store.MessageRepository
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import io.github.thatsfguy.reticulum.store.StoredMessage
+import io.github.thatsfguy.reticulum.store.durableUserLabel
+import io.github.thatsfguy.reticulum.store.isEphemeralManualLabel
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.toHex
@@ -490,6 +492,10 @@ class ReticulumEngine(
      *  toggle without restarting the service. Audit reference:
      *  2026-05-13 MED-6. */
     private val dropUnverifiedProvider: () -> Boolean = { false },
+    /** Milliseconds between automatic re-announces per attached transport.
+     *  `0` disables the periodic timer (manual announce still works).
+     *  Read on every timer tick so Settings changes apply without restart. */
+    private val announceIntervalMsProvider: () -> Long = { AnnounceIntervalPresets.DEFAULT_MS },
     /** Optional NomadNet page cache. When provided, [fetchNomadPage]
      *  writes successful fetches here so the UI can render the previous
      *  version on next visit while a fresh fetch runs in the background.
@@ -866,31 +872,13 @@ class ReticulumEngine(
      *  in-flight DATA against rotation. */
     private var lastRatchetRotationMs: Long = 0L
 
-    /** Periodic re-announce interval per network type. Reticulum
-     *  penalizes frequent announcers — transport nodes apply
-     *  announce_rate_target / _grace / _penalty and push spammy
-     *  destinations to the back of the propagation queue (upstream
-     *  manual, "Announce Rate Control"). Guidance is "no more than once
-     *  an hour", so:
-     *   - [TransportKind.Tcp] internet hub: 60 min — at/above any hub's
-     *     rate-limit (e.g. rns.michmesh.net = 15 min) so we stay clear of
-     *     the grace/penalty edge on stricter hubs too.
-     *   - RF/LoRa (Ble/BtClassic/Usb/AgnosticLora): 60 min — no transport
-     *     node enforcing limits here, but LoRa airtime is scarce so it's
-     *     also conservative.
-     *  Kept per-kind so the two can diverge later without a refactor. */
-    private fun announceIntervalMsFor(kind: TransportKind): Long = when (kind) {
-        TransportKind.Tcp -> 60 * 60_000L
-        TransportKind.Ble,
-        TransportKind.BtClassic,
-        TransportKind.Usb,
-        TransportKind.AgnosticLora -> 60 * 60_000L
-    }
-
-    /** True for direct RF/LoRa transports (everything except the TCP
-     *  internet hub). RF has no transport node enforcing announce rate
+    /** Periodic re-announce interval. User-configurable via
+     *  [announceIntervalMsProvider]; `0` disables auto announce. */
+    /** True for direct RF/LoRa transports (everything except TCP and
+     *  LAN AutoInterface). RF has no transport node enforcing announce rate
      *  limits, so the before-send re-announce burst is RF-only. */
-    private fun isRfKind(kind: TransportKind): Boolean = kind != TransportKind.Tcp
+    private fun isRfKind(kind: TransportKind): Boolean =
+        kind != TransportKind.Tcp && kind != TransportKind.AutoInterface
 
     /** Minimum age of our last RF announce before [sendMessage] tops up
      *  our return path up front (RF-only). Keeps the recipient's
@@ -1103,8 +1091,13 @@ class ReticulumEngine(
         // clobbering the user's intent. effectiveDisplayName prefers
         // userLabel anyway, so the UI renders the user's label as soon
         // as the row is created.
+        //
+        // Ephemeral provenance strings ("(via URL bar)", …) are NOT
+        // durable nicknames — [durableUserLabel] drops them so an
+        // announce can replace the empty name with the node's real one.
+        val durableLabel = durableUserLabel(label)
         val merged = existing?.copy(
-            userLabel = label.takeIf { it.isNotBlank() } ?: existing.userLabel,
+            userLabel = durableLabel ?: existing.userLabel?.takeUnless { isEphemeralManualLabel(it) },
             favorite = true,
         ) ?: StoredDestination(
             hash = normalized,
@@ -1124,7 +1117,7 @@ class ReticulumEngine(
             rssi = null,
             favorite = true,
             source = "manual",
-            userLabel = label.takeIf { it.isNotBlank() },
+            userLabel = durableLabel,
         )
         destinationRepo.upsertManualStub(merged)
         _events.tryEmit(EngineEvent.Log("manual destination: $normalized"))
@@ -2611,10 +2604,15 @@ class ReticulumEngine(
         if (reannounceJobs[kind] == null) {
             reannounceJobs[kind] = scope.launch {
                 while (true) {
-                    runCatching { sendAnnounceIfDue(kind) }.onFailure {
-                        _events.tryEmit(EngineEvent.Log("announce failed on $kind: ${it.message}"))
+                    val interval = announceIntervalMsProvider()
+                    if (interval > 0L) {
+                        runCatching { sendAnnounceIfDue(kind) }.onFailure {
+                            _events.tryEmit(EngineEvent.Log("announce failed on $kind: ${it.message}"))
+                        }
+                        delay(interval)
+                    } else {
+                        delay(30_000L)
                     }
-                    delay(announceIntervalMsFor(kind))
                 }
             }
         }
@@ -2794,9 +2792,10 @@ class ReticulumEngine(
      *  (Settings → Send announce, identity reset/import, display-name
      *  change) call [sendAnnounce] directly to hit every transport. */
     suspend fun sendAnnounceIfDue(kind: TransportKind) {
+        val interval = announceIntervalMsProvider()
+        if (interval <= 0L) return
         val now = nowMs()
         val last = lastAnnounceByKind[kind] ?: 0L
-        val interval = announceIntervalMsFor(kind)
         val sinceLast = now - last
         if (last != 0L && sinceLast < interval) {
             _events.tryEmit(EngineEvent.Log(
@@ -4685,8 +4684,10 @@ class ReticulumEngine(
             nextHop = mergedPath.nextHop,
             // Preserve the user's local nickname across announce
             // overwrites — without this an inbound re-announce would
-            // null out the userLabel on every path-response.
-            userLabel = existing?.userLabel,
+            // null out the userLabel on every path-response. Ephemeral
+            // provenance placeholders ("(via URL bar)", …) are cleared
+            // so the announce-derived displayName can surface.
+            userLabel = existing?.userLabel?.takeUnless { isEphemeralManualLabel(it) },
         )
         destinationRepo.upsertFromAnnounce(merged)
         maybeEvictDestinations()
@@ -5444,7 +5445,7 @@ class ReticulumEngine(
         ) : EngineEvent()
     }
 
-    enum class TransportKind { Ble, BtClassic, Tcp, Usb, AgnosticLora }
+    enum class TransportKind { Ble, BtClassic, Tcp, Usb, AgnosticLora, AutoInterface }
 
     /** Connection state plus the wall-clock millis when [transport]
      *  last changed. UI uses changedAtMs to show "Connecting (12s)…"

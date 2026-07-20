@@ -142,6 +142,17 @@ internal interface NomadPageCacheDao {
 /** Projection for [MessageDao.observeLastMessageTimes]. */
 internal data class ConversationLastTime(val contactHash: String, val lastTs: Long)
 
+internal data class ConversationPreviewRow(
+    val contactHash: String,
+    val direction: String,
+    val content: String,
+    val timestamp: Long,
+    val attachmentName: String?,
+    val hasImage: Long,
+    val hasFile: Long,
+    val audioMode: Int?,
+)
+
 /** Projection for [MessageDao.observeIncomingTimestamps] — one row per
  *  incoming message, keyed by sender. The ViewModel groups by
  *  [contactHash] and compares each [timestamp] to the per-contact
@@ -169,6 +180,49 @@ internal interface MessageDao {
 
     @Query("SELECT * FROM messages ORDER BY timestamp ASC, id ASC")
     suspend fun getAll(): List<MessageEntity>
+
+    /** Latest visible message in each conversation, for thread previews. */
+    @Query("""
+        SELECT
+            message.contactHash,
+            message.direction,
+            message.content,
+            message.timestamp,
+            message.attachmentName,
+            CASE
+                WHEN message.imageToken IS NOT NULL OR message.imageBytes IS NOT NULL THEN 1
+                ELSE 0
+            END AS hasImage,
+            CASE
+                WHEN message.attachmentToken IS NOT NULL OR message.attachmentBytes IS NOT NULL THEN 1
+                ELSE 0
+            END AS hasFile,
+            message.audioMode
+        FROM messages AS message
+        WHERE message.direction != 'outgoing-reaction'
+          AND (
+              message.content != ''
+              OR message.imageToken IS NOT NULL
+              OR message.imageBytes IS NOT NULL
+              OR message.attachmentToken IS NOT NULL
+              OR message.attachmentBytes IS NOT NULL
+          )
+          AND message.id = (
+              SELECT candidate.id FROM messages AS candidate
+              WHERE candidate.contactHash = message.contactHash
+                AND candidate.direction != 'outgoing-reaction'
+                AND (
+                    candidate.content != ''
+                    OR candidate.imageToken IS NOT NULL
+                    OR candidate.imageBytes IS NOT NULL
+                    OR candidate.attachmentToken IS NOT NULL
+                    OR candidate.attachmentBytes IS NOT NULL
+                )
+              ORDER BY candidate.timestamp DESC, candidate.id DESC
+              LIMIT 1
+          )
+    """)
+    fun observeLatestMessagePreviews(): Flow<List<ConversationPreviewRow>>
 
     /** Last-message timestamp per conversation — drives the recency
      *  sort on the Messages tab. */

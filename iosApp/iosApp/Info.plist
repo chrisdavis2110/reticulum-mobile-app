@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Reticulum</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Reticulum uses Bluetooth Low Energy to talk to your local RNode (LoRa modem). Granting Bluetooth lets the app receive and send messages over the LoRa mesh.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Reticulum uses the camera to scan QR codes encoding another user's destination hash or IdentityCard so you can add them as a contact without typing a 32-character hex string.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Reticulum uses the local network to discover other Reticulum nodes on your Wi‑Fi via AutoInterface (IPv6 multicast). This lets you mesh with desktop rnsd instances on the same LAN without an internet transport node.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Reticulum uses the microphone to record voice-message clips you choose to send over the LoRa mesh. Audio is recorded only while you hold or tap the record button.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string></string>
+	</dict>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>armv7</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

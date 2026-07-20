@@ -294,4 +294,27 @@ class LinkTargetTest {
             parseFormSubmitTarget("/page/board/b.mu", "garbage://"),
         )
     }
+
+    @Test fun `format and parse nomad url round trip`() {
+        val url = formatNomadUrl(hex, "/page/index.mu")
+        assertEquals("$hex:/page/index.mu", url)
+        assertEquals(
+            ParsedNomadUrl(hex, "/page/index.mu"),
+            parseNomadUrl(url, currentNodeHash = null),
+        )
+    }
+
+    @Test fun `parse nomad url relative colon path`() {
+        assertEquals(
+            ParsedNomadUrl(hex, "/page/search.mu"),
+            parseNomadUrl(":/page/search.mu", currentNodeHash = hex),
+        )
+    }
+
+    @Test fun `parse nomad url bare hash defaults index`() {
+        assertEquals(
+            ParsedNomadUrl(hex, "/page/index.mu"),
+            parseNomadUrl(hex, currentNodeHash = null),
+        )
+    }
 }

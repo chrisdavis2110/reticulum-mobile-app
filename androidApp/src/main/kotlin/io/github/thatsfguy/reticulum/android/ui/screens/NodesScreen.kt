@@ -81,9 +81,6 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
     val filter by viewModel.nodeFilter.collectAsState()
     val search by viewModel.nodeSearch.collectAsState()
     val rows by viewModel.filteredDestinations.collectAsState(initial = emptyList())
-    // Drives the per-row "open in Relay Chat" action on rrc.hub rows;
-    // hidden entirely when the experimental RRC feature is off.
-    val rrcEnabled by viewModel.experimentalRrc.collectAsState(initial = false)
 
     var showAddDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<StoredDestination?>(null) }
@@ -193,7 +190,6 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 ) {
                     MenuSectionLabel("Filter")
                     ReticulumViewModel.NodeFilter.values()
-                        .filter { it != ReticulumViewModel.NodeFilter.Rrc || rrcEnabled }
                         .forEach { f ->
                             DropdownMenuItem(
                                 text = { Text(f.label) },
@@ -267,9 +263,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 onRequestRename = { renameTarget = it },
                 onRequestDelete = { deleteTarget = it },
                 onOpenConversation = { hash -> viewModel.openContact(hash) },
-                onOpenAsRrcHub = if (rrcEnabled) {
-                    { dest -> viewModel.addRrcHubFromNode(dest) }
-                } else null,
+                onOpenAsRrcHub = { dest -> viewModel.addRrcHubFromNode(dest) },
             )
         }
     }

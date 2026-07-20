@@ -78,7 +78,7 @@ struct MicronView: View {
         } else if let part = block as? Block.Partial {
             PartialBlockView(block: part, baseColor: baseColor, fetchPartial: fetchPartial)
         } else if let hr = block as? Block.HorizontalRule {
-            HorizontalRuleView(rune: Character(String(hr.rune)))
+            HorizontalRuleView(runeText: micronHorizontalRuleRuneText(hr.rune))
         } else {
             EmptyView()
         }
@@ -347,14 +347,22 @@ private struct PartialBlockView: View {
 
 // MARK: - Horizontal rule
 
+/// Kotlin exports [Block.HorizontalRule.rune] as `unichar` (UInt16).
+/// `String(codeUnit)` would format the *number* ("9472"), not the glyph —
+/// and `Character("9472")` traps. Convert via Unicode.Scalar instead.
+private func micronHorizontalRuleRuneText(_ codeUnit: unichar) -> String {
+    guard let scalar = Unicode.Scalar(codeUnit) else { return "─" }
+    return String(Character(scalar))
+}
+
 private struct HorizontalRuleView: View {
-    let rune: Character
+    let runeText: String
 
     var body: some View {
-        if rune == "─" {
+        if runeText == "─" {
             Divider()
         } else {
-            Text(String(repeating: String(rune), count: 48))
+            Text(String(repeating: runeText, count: 48))
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(Color.gray.opacity(0.5))
                 .frame(maxWidth: .infinity, alignment: .leading)

@@ -14,10 +14,6 @@ import SwiftUI
 
 struct NodesView: View {
     @EnvironmentObject private var store: ReticulumStore
-    /// Drives the "Open in Relay Chat" detail-sheet action + the RRC
-    /// filter preset; both hidden when the experimental feature is off.
-    @AppStorage("experimental.rrc") private var experimentalRrc: Bool = false
-
     enum Filter: String, CaseIterable, Identifiable, Hashable {
         case contacts   = "Contacts"
         case messagable = "Messagable"
@@ -40,10 +36,6 @@ struct NodesView: View {
     @State private var detailRow: StoredDestination? = nil
     @State private var renameTarget: StoredDestination? = nil
     @State private var pendingDelete: StoredDestination? = nil
-
-    private var availableFilters: [Filter] {
-        experimentalRrc ? Filter.allCases : Filter.allCases.filter { $0 != .rrc }
-    }
 
     var body: some View {
         NavigationStack {
@@ -90,7 +82,7 @@ struct NodesView: View {
                         detailRow = nil
                         store.openContact(hash: hash)
                     },
-                    onOpenAsRrcHub: experimentalRrc ? { d in
+                    onOpenAsRrcHub: { d in
                         detailRow = nil
                         // Idempotent upsert — if the hub is already
                         // in the rrc_hubs table this is a no-op merge.
@@ -107,13 +99,8 @@ struct NodesView: View {
                         // Fire the deep-link event — ContentView
                         // switches the tab to Rooms and RoomsView
                         // pushes the hub onto its NavigationStack.
-                        // Pre-fix this was missing, so the button
-                        // silently added a row to the Rooms tab list
-                        // without taking the user there — tester
-                        // report: "Open in RRC button didn't work for
-                        // him from the slide out".
                         store.openRrcHub(hash: d.hash)
-                    } : nil,
+                    },
                     onRename: { d in
                         detailRow = nil
                         presentAfterDismiss { renameTarget = d }
@@ -222,7 +209,7 @@ struct NodesView: View {
                 // Ellipsis — filter only, post split.
                 Menu {
                     Picker("Filter", selection: $filter) {
-                        ForEach(availableFilters) { f in
+                        ForEach(Filter.allCases) { f in
                             Text(f.rawValue).tag(f)
                         }
                     }
@@ -441,7 +428,9 @@ private struct NodeAvatar: View {
 
 // ---- Add-by-hash sheet -------------------------------------------------
 
-private struct AddDestinationSheet: View {
+/// Shared add-by-hash / QR sheet. Used from the Messages node picker
+/// (and formerly the Nodes tab).
+struct AddDestinationSheet: View {
     @State private var hash: String = ""
     @State private var label: String = ""
     @State private var showScanner: Bool = false

@@ -224,3 +224,60 @@ fun resolveSubmitPath(currentPath: String, target: String): String {
         is FormSubmitTarget.Self -> currentPath
     }
 }
+
+/** MeshChatX / RetiNet-style location string: `nodehash:/page/index.mu`. */
+fun formatNomadUrl(nodeHashHex: String, path: String): String =
+    "${nodeHashHex.lowercase()}:$path"
+
+/** Parsed absolute Nomad URL for the browser address bar. */
+data class ParsedNomadUrl(
+    val nodeHashHex: String,
+    val path: String,
+)
+
+/**
+ * Parse a user-entered Nomad URL for the browser address bar.
+ *
+ * Accepts:
+ *   `32hex:/page/index.mu` — absolute
+ *   `:relative/path.mu` or `/page/foo.mu` — relative to [currentNodeHash]
+ *   `32hex` — node index page
+ */
+fun parseNomadUrl(raw: String, currentNodeHash: String?): ParsedNomadUrl? {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return null
+
+    if (trimmed.startsWith(":")) {
+        val rest = trimmed.substring(1)
+        val path = rest.ifEmpty { DEFAULT_NOMAD_PATH }
+        val hash = currentNodeHash?.lowercase() ?: return null
+        if (!isPathSafe(path)) return null
+        return ParsedNomadUrl(hash, path)
+    }
+
+    if (trimmed.startsWith("/")) {
+        val hash = currentNodeHash?.lowercase() ?: return null
+        if (!isPathSafe(trimmed)) return null
+        return ParsedNomadUrl(hash, trimmed)
+    }
+
+    val colon = trimmed.indexOf(':')
+    if (colon > 0) {
+        val hashPart = trimmed.substring(0, colon)
+        if (isValidHashHex(hashPart)) {
+            var pathPart = trimmed.substring(colon + 1)
+            if (pathPart.isEmpty()) pathPart = DEFAULT_NOMAD_PATH
+            if (!pathPart.startsWith("/") || !isPathSafe(pathPart)) return null
+            return ParsedNomadUrl(hashPart.lowercase(), pathPart)
+        }
+    }
+
+    return when (val parsed = parseLinkTarget(trimmed)) {
+        is LinkTarget.CrossNode -> ParsedNomadUrl(parsed.destHashHex, parsed.path)
+        is LinkTarget.SameNode -> {
+            val hash = currentNodeHash?.lowercase() ?: return null
+            ParsedNomadUrl(hash, parsed.path)
+        }
+        else -> null
+    }
+}

@@ -7,6 +7,7 @@ import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.engine.RrcEvent
 import io.github.thatsfguy.reticulum.engine.RrcState
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
+import io.github.thatsfguy.reticulum.store.ConversationPreview
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.store.StoredRrcHub
@@ -151,16 +152,7 @@ class ReticulumViewModel : ViewModel() {
     private val _nodeSearch = MutableStateFlow("")
     val nodeSearch: StateFlow<String> = _nodeSearch.asStateFlow()
 
-    // ---- Nomad-tab filters (v0.1.48) ------------------------------------
-
-    enum class NomadFilter(val label: String) {
-        All("All"),
-        Favorites("Favorites"),
-        Cached("Cached"),
-    }
-    private val _nomadFilter = MutableStateFlow(NomadFilter.All)
-    val nomadFilter: StateFlow<NomadFilter> = _nomadFilter.asStateFlow()
-    fun setNomadFilter(value: NomadFilter) { _nomadFilter.value = value }
+    // ---- Nomad-tab search -----------------------------------------------
 
     private val _nomadSearch = MutableStateFlow("")
     val nomadSearch: StateFlow<String> = _nomadSearch.asStateFlow()
@@ -291,11 +283,12 @@ class ReticulumViewModel : ViewModel() {
     val messageSearch: StateFlow<String> = _messageSearch.asStateFlow()
     fun setMessageSearch(query: String) { _messageSearch.value = query }
 
+    /** Latest visible message per contact, driving conversation previews. */
     @OptIn(ExperimentalCoroutinesApi::class)
-    private val lastMessageTimes: Flow<Map<String, Long>> =
+    val latestMessages: Flow<Map<String, ConversationPreview>> =
         _service.flatMapLatest { svc ->
-            svc?.repos?.observeLastMessageTimes() ?: flowOf(emptyMap())
-        }
+            svc?.repos?.observeLatestMessagePreviews() ?: flowOf(emptyList())
+        }.map { messages -> messages.associateBy { it.contactHash } }
 
     /** Per-contact list of incoming-message timestamps. Joined with
      *  [lastReadTimes] below to derive [unreadCounts]. */
@@ -367,10 +360,10 @@ class ReticulumViewModel : ViewModel() {
      *  filtered by [messageSearch]. */
     val conversations: Flow<List<StoredDestination>> =
         combine(
-            allDestinations, lastMessageTimes, pinnedConversations, _messageSearch,
-        ) { dests, times, pinned, search ->
+            allDestinations, latestMessages, pinnedConversations, _messageSearch,
+        ) { dests, latest, pinned, search ->
             val byHash = dests.associateBy { it.hash }
-            val convHashes = (times.keys + dests.filter {
+            val convHashes = (latest.keys + dests.filter {
                 it.favorite && (it.isMessagable || it.publicKey.isEmpty())
             }.map { it.hash }).distinct()
             val rows = convHashes.map { hash -> byHash[hash] ?: stubDestination(hash) }
@@ -381,7 +374,7 @@ class ReticulumViewModel : ViewModel() {
             }
             filtered.sortedWith(
                 compareByDescending<StoredDestination> { it.hash in pinned }
-                    .thenByDescending { times[it.hash] ?: it.lastSeen },
+                    .thenByDescending { latest[it.hash]?.timestamp ?: it.lastSeen },
             )
         }
 
@@ -467,7 +460,7 @@ class ReticulumViewModel : ViewModel() {
      * experimental RRC feature being enabled.
      */
     private fun scheduleRrcRestore(svc: ReticulumService) {
-        if (rrcHubsRestored || !svc.prefs.experimentalRrc.value) return
+        if (rrcHubsRestored) return
         val hubs = svc.prefs.liveRrcHubs.value
         if (hubs.isEmpty()) {
             rrcHubsRestored = true
@@ -693,7 +686,7 @@ class ReticulumViewModel : ViewModel() {
         val svc = _service.value ?: return null
         val existing = runCatching { svc.repos.destinations.get(hashHex) }.getOrNull()
         if (existing != null && existing.publicKey.size == 64) return existing
-        val stub = runCatching { svc.addManualDestination(hashHex, "(via cross-node link)") }
+        val stub = runCatching { svc.addManualDestination(hashHex, "") }
             .onFailure { _logLines.update { lines -> (lines + "manual add fail: ${it.message}").takeLast(500) } }
             .getOrNull() ?: return null
         // Fire-and-forget path request — fetchNomadPage will re-prime
@@ -761,6 +754,60 @@ class ReticulumViewModel : ViewModel() {
             runCatching { svc.sendVoiceClip(destHash, bytes) }
                 .onFailure { _logLines.update { lines -> (lines + "voice send fail: ${it.message}").takeLast(500) } }
         }
+    }
+
+    /** Re-send an outgoing message — creates a fresh outbound row with the
+     *  same text, image, file, or voice clip (and reply target, if any). */
+    fun resendMessage(msg: StoredMessage) {
+        val svc = _service.value ?: return
+        val destHash = _selectedDestination.value ?: return
+        if (msg.direction != "outgoing") return
+        viewModelScope.launch {
+            runCatching {
+                val hasAudio = msg.audioMode != null
+                val hasImage = msg.imageToken != null || msg.imageBytes != null
+                val hasFile = msg.audioMode == null &&
+                    (msg.attachmentToken != null || msg.attachmentBytes != null)
+                if (hasAudio) {
+                    val bytes = withContext(Dispatchers.IO) {
+                        msg.attachmentToken?.let { svc.attachmentStore.load(it) } ?: msg.attachmentBytes
+                    } ?: return@runCatching
+                    svc.sendVoiceClip(destHash, bytes)
+                } else {
+                    val imageBytes = withContext(Dispatchers.IO) {
+                        if (hasImage) resendImageBytes(msg, svc.attachmentStore) else null
+                    }
+                    val fileBytes = withContext(Dispatchers.IO) {
+                        if (hasFile) {
+                            msg.attachmentToken?.let { svc.attachmentStore.load(it) }
+                                ?: msg.attachmentBytes
+                        } else null
+                    }
+                    svc.sendMessage(
+                        destHash,
+                        msg.content,
+                        imageBytes,
+                        fileBytes,
+                        msg.attachmentName,
+                        msg.replyToMessageId,
+                    )
+                }
+            }.onFailure {
+                _logLines.update { lines -> (lines + "resend fail: ${it.message}").takeLast(500) }
+            }
+        }
+    }
+
+    private fun resendImageBytes(
+        msg: StoredMessage,
+        store: io.github.thatsfguy.reticulum.store.AttachmentStore?,
+    ): ByteArray? {
+        val token = msg.imageToken
+        if (token != null) {
+            val path = store?.pathFor(token) ?: return null
+            return runCatching { java.io.File(path).readBytes() }.getOrNull()
+        }
+        return msg.imageBytes
     }
 
     fun sendReaction(destinationHash: String, targetMessageId: String, emoji: String) {
@@ -1026,6 +1073,17 @@ class ReticulumViewModel : ViewModel() {
     val themePreference: Flow<String> =
         _service.flatMapLatest { svc -> svc?.prefs?.themePreference ?: flowOf("system") }
 
+    /** Automatic re-announce cadence (ms). `0` = manual only. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val announceIntervalMs: Flow<Long> =
+        _service.flatMapLatest { svc ->
+            svc?.prefs?.announceIntervalMs ?: flowOf(io.github.thatsfguy.reticulum.engine.AnnounceIntervalPresets.DEFAULT_MS)
+        }
+
+    fun setAnnounceIntervalMs(ms: Long) {
+        _service.value?.prefs?.setAnnounceIntervalMs(ms)
+    }
+
     /** All known RRC hubs, most-recently-connected first. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val rrcHubs: Flow<List<StoredRrcHub>> =
@@ -1270,7 +1328,7 @@ class ReticulumViewModel : ViewModel() {
             }.getOrNull()
             if (existing == null) {
                 runCatching {
-                    svc.addManualDestination(hashHex = hash, label = "(via shared link)")
+                    svc.addManualDestination(hashHex = hash, label = "")
                 }.onFailure {
                     _logLines.update { l -> (l + "nomad link add-manual fail: ${it.message}").takeLast(500) }
                 }

@@ -59,10 +59,15 @@ final class IosNotifications: NSObject {
     /// Post a notification for an incoming LXMF message. Idempotent
     /// per messageId — re-posting a duplicate (engine retry, etc.)
     /// just refreshes the existing row instead of stacking.
-    func post(_ info: IncomingMessageInfo) {
+    /// Honors Settings → Notifications prefs (master + Messages + sound).
+    func post(_ info: IncomingMessageInfo, destinationName: String) {
+        let d = UserDefaults.standard
+        let masterOn = d.object(forKey: "notifications.enabled") as? Bool ?? true
+        let messagesOn = d.object(forKey: "notifications.messagesEnabled") as? Bool ?? true
+        guard masterOn, messagesOn else { return }
         ensureAuthorized { ok in
             guard ok else { return }
-            self.deliver(info)
+            self.deliver(info, destinationName: destinationName)
         }
     }
 
@@ -78,14 +83,39 @@ final class IosNotifications: NSObject {
     /// Caller (ReticulumStore.recomputeUnreadBadge) computes the per-
     /// contact-aware total from messageRepo.getAll() filtered against
     /// each contact's lastSeen timestamp; this helper just pushes the
-    /// value to iOS.
+    /// value to iOS. Honors Settings → Notifications → App icon badge.
     ///
     /// Uses the iOS 16+ setBadgeCount API; the app's deploymentTarget
     /// (project.yml) is 17.0 so the fallback applicationIconBadgeNumber
     /// path isn't strictly required, but keeping the API choice in one
     /// place lets us flip if we ever lower the target.
     func setBadge(_ count: Int) {
-        UNUserNotificationCenter.current().setBadgeCount(max(0, count)) { _ in }
+        let d = UserDefaults.standard
+        let masterOn = d.object(forKey: "notifications.enabled") as? Bool ?? true
+        let badgeOn = d.object(forKey: "notifications.badgeEnabled") as? Bool ?? true
+        let value = (masterOn && badgeOn) ? max(0, count) : 0
+        UNUserNotificationCenter.current().setBadgeCount(value) { _ in }
+    }
+
+    /// Prompt for notification permission if we haven't already, or
+    /// refresh [authorized] from the current system status. Called from
+    /// Settings when the user turns Allow notifications ON.
+    func requestAuthorizationIfNeeded() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            Task { @MainActor in
+                switch settings.authorizationStatus {
+                case .authorized, .provisional, .ephemeral:
+                    self.authorized = true
+                    self.hasRequestedAuth = true
+                case .notDetermined:
+                    self.hasRequestedAuth = false
+                    self.ensureAuthorized { _ in }
+                default:
+                    self.authorized = false
+                    self.hasRequestedAuth = true
+                }
+            }
+        }
     }
 
     // MARK: - Private
@@ -106,14 +136,18 @@ final class IosNotifications: NSObject {
         }
     }
 
-    private func deliver(_ info: IncomingMessageInfo) {
+    private func deliver(_ info: IncomingMessageInfo, destinationName: String) {
         let content = UNMutableNotificationContent()
-        content.title = info.verified ? "New message" : "Unverified message"
+        content.title = destinationName
+        if !info.verified {
+            content.subtitle = "Unverified message"
+        }
         // Cap body at 200 chars to keep notification UI legible — the
         // full content is in the in-app conversation view.
         let preview = String(info.content.prefix(200))
         content.body = preview
-        content.sound = .default
+        let soundOn = UserDefaults.standard.object(forKey: "notifications.soundEnabled") as? Bool ?? true
+        content.sound = soundOn ? .default : nil
         content.userInfo = [Self.userInfoContactHash: info.contactHash]
 
         // Per-message badge is intentionally NOT set here — the
@@ -152,7 +186,10 @@ extension IosNotifications: UNUserNotificationCenterDelegate {
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .sound, .list])
+        let soundOn = UserDefaults.standard.object(forKey: "notifications.soundEnabled") as? Bool ?? true
+        var options: UNNotificationPresentationOptions = [.banner, .list]
+        if soundOn { options.insert(.sound) }
+        completionHandler(options)
     }
 
     /// Tap or action on a delivered notification. Stash the hash on

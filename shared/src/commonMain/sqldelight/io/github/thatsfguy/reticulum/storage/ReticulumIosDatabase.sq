@@ -251,6 +251,47 @@ SELECT *
 FROM messages
 ORDER BY timestamp ASC, id ASC;
 
+observeLatestMessagePreviews:
+SELECT
+    message.contactHash,
+    message.direction,
+    message.content,
+    message.timestamp,
+    message.attachmentName,
+    CASE
+        WHEN message.imageToken IS NOT NULL OR message.imageBytes IS NOT NULL THEN 1
+        ELSE 0
+    END AS hasImage,
+    CASE
+        WHEN message.attachmentToken IS NOT NULL OR message.attachmentBytes IS NOT NULL THEN 1
+        ELSE 0
+    END AS hasFile,
+    message.audioMode
+FROM messages AS message
+WHERE message.direction != 'outgoing-reaction'
+  AND (
+      message.content != ''
+      OR message.imageToken IS NOT NULL
+      OR message.imageBytes IS NOT NULL
+      OR message.attachmentToken IS NOT NULL
+      OR message.attachmentBytes IS NOT NULL
+  )
+  AND message.id = (
+      SELECT candidate.id
+      FROM messages AS candidate
+      WHERE candidate.contactHash = message.contactHash
+        AND candidate.direction != 'outgoing-reaction'
+        AND (
+            candidate.content != ''
+            OR candidate.imageToken IS NOT NULL
+            OR candidate.imageBytes IS NOT NULL
+            OR candidate.attachmentToken IS NOT NULL
+            OR candidate.attachmentBytes IS NOT NULL
+        )
+      ORDER BY candidate.timestamp DESC, candidate.id DESC
+      LIMIT 1
+  );
+
 -- Prefix LIKE so both pre-v1.1.22 truncated (32 hex char) and v1.1.22+
 -- full (64 hex char) packetHash values match against the inbound
 -- PROOF's 32-char truncated dest_hash. The full form is needed by the

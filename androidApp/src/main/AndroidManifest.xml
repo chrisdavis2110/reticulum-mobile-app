@@ -21,8 +21,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Network for TCP transport + map tiles -->
+    <!-- Network for TCP transport + map tiles + AutoInterface LAN discovery -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- Camera for QR scanning on the Nodes tab -->
     <uses-permission android:name="android.permission.CAMERA" />

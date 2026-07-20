@@ -9,10 +9,9 @@ import Shared
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Signal-style tap-back palette. Six emoji mirrors the Android
-/// `REACTION_PALETTE` in MessagesScreen.kt — same order so the
-/// cross-platform UX is identical.
-let REACTION_PALETTE: [String] = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+/// Compact tap-back palette: like, heart, dislike, laugh. Mirrors the
+/// Android `REACTION_PALETTE` in MessagesScreen.kt.
+let REACTION_PALETTE: [String] = ["👍", "❤️", "👎", "😂"]
 
 struct MessageBubble: View {
     let msg: StoredMessage
@@ -34,7 +33,7 @@ struct MessageBubble: View {
     /// docs/ATTACHMENT-STORE.md §3.3 dual-read.
     let attachmentStore: AttachmentStore?
     /// Invoked when the user picks an emoji from the long-press
-    /// context menu. Caller (ConversationView) routes it to
+    /// action popover. Caller (ConversationView) routes it to
     /// `store.sendReaction(destinationHash, msg.messageId, emoji)`.
     let onReact: (String) -> Void
     /// Invoked when the user swipes right past the threshold —
@@ -42,6 +41,8 @@ struct MessageBubble: View {
     let onSwipeReply: () -> Void
     /// Long-press → Delete (local-only delete of this row).
     let onDelete: () -> Void
+    /// Long-press → Resend (outgoing only — re-sends content + attachments).
+    let onResend: () -> Void
     /// Long-press → Info (opens the metadata sheet for this row).
     let onShowInfo: () -> Void
     /// True when this row's voice clip is currently playing (the parent
@@ -52,6 +53,10 @@ struct MessageBubble: View {
     var onToggleVoice: () -> Void = {}
 
     @State private var showZoom = false
+    /// Compact long-press action bar (reactions + Copy/Info/…).
+    /// Replaces `.contextMenu` so the emoji row stays tight on one
+    /// line instead of ControlGroup stretching across the menu width.
+    @State private var showActions = false
     /// Drives the system save dialog for a file attachment.
     @State private var showSaveExporter = false
     /// The bubble's attachment image, decoded off the main actor by
@@ -142,7 +147,9 @@ struct MessageBubble: View {
                 }
                 if !msg.content.isEmpty {
                     Text(linkifyAttributedString(msg.content))
-                        .textSelection(.enabled)
+                        // No `.textSelection(.enabled)` — that steals the
+                        // long-press for the system text-selection UI.
+                        // Copy lives on the message action menu instead.
                         .tint(outgoing ? .white : Color.accentColor)
                 }
                 // LXMF file attachment (FIELD_FILE_ATTACHMENTS, SPEC
@@ -299,6 +306,7 @@ struct MessageBubble: View {
             // id to reference). The gesture is gated on horizontal-
             // only drags so it doesn't fight List's vertical scroll.
             .offset(x: dragOffsetX)
+            .contentShape(Rectangle())
             .gesture(
                 msg.messageId != nil ? DragGesture(minimumDistance: 12)
                     .onChanged { value in
@@ -322,56 +330,22 @@ struct MessageBubble: View {
                         }
                     } : nil
             )
-            .contextMenu {
-                // Tap-back reaction picker — wrapped in a
-                // `ControlGroup` so SwiftUI lays the six emojis out
-                // as a HORIZONTAL row at the top of the context
-                // menu, iMessage-style. Without the ControlGroup,
-                // .contextMenu defaults to a vertical list and each
-                // emoji stacks on its own line — tester report
-                // (2026-05-21): "the emojies are all vertically
-                // aligned vs. horizontally". Gated on:
-                //   - msg.messageId != nil (pre-1.1.33 rows have
-                //     no target id, nothing to react to)
-                //   - !outgoing (no self-reactions — every reaction
-                //     is an LXMF round-trip, and reacting to your
-                //     own message is a UX foot-gun)
-                if msg.messageId != nil && !outgoing {
-                    ControlGroup {
-                        ForEach(REACTION_PALETTE, id: \.self) { emoji in
-                            Button { onReact(emoji) } label: {
-                                Text(emoji)
-                            }
-                        }
-                    }
-                }
-                // Copy — same tester report flagged that iOS rows
-                // had no copy action. `.textSelection(.enabled)` on
-                // the Text further down lets users long-press +
-                // drag through the text-selection handles, but the
-                // outer .contextMenu was capturing the long-press
-                // first, so the standard selection UI never
-                // appeared. An explicit Copy button is the
-                // platform-idiomatic answer — only shown when the
-                // bubble actually has copyable text (image-only and
-                // file-only rows hide it).
-                if !msg.content.isEmpty {
-                    Button {
-                        UIPasteboard.general.string = msg.content
-                    } label: {
-                        Label("Copy", systemImage: "doc.on.doc")
-                    }
-                }
-                Button {
-                    onShowInfo()
-                } label: {
-                    Label("Info", systemImage: "info.circle")
-                }
-                Button(role: .destructive) {
-                    onDelete()
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
+            // simultaneous so long-press still fires alongside the
+            // swipe-reply drag (and isn't eaten by List scroll).
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.35)
+                    .onEnded { _ in showActions = true }
+            )
+            // arrowEdge `.bottom` puts the popover ABOVE the bubble
+            // (arrow points down at the message). List cells clip
+            // in-row overlays, so the system popover is required.
+            .popover(
+                isPresented: $showActions,
+                attachmentAnchor: .rect(.bounds),
+                arrowEdge: .bottom
+            ) {
+                messageActionMenu
+                    .presentationCompactAdaptation(.popover)
             }
             if !outgoing { Spacer(minLength: 40) }
         }
@@ -386,6 +360,77 @@ struct MessageBubble: View {
         .task(id: msg.id) {
             resolvedImage = await resolveImage()
         }
+    }
+
+    /// Compact reaction + action strip shown above the bubble on
+    /// long-press.
+    private var messageActionMenu: some View {
+        VStack(spacing: 8) {
+            if msg.messageId != nil && !outgoing {
+                HStack(spacing: 2) {
+                    ForEach(REACTION_PALETTE, id: \.self) { emoji in
+                        Button {
+                            onReact(emoji)
+                            showActions = false
+                        } label: {
+                            Text(emoji)
+                                .font(.title2)
+                                .frame(width: 40, height: 40)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                Divider()
+            }
+            VStack(spacing: 0) {
+                if !msg.content.isEmpty {
+                    Button {
+                        UIPasteboard.general.string = msg.content
+                        showActions = false
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if outgoing {
+                    Button {
+                        onResend()
+                        showActions = false
+                    } label: {
+                        Label("Resend", systemImage: "arrow.clockwise")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button {
+                    onShowInfo()
+                    showActions = false
+                } label: {
+                    Label("Info", systemImage: "info.circle")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 4)
+                }
+                .buttonStyle(.plain)
+                Button(role: .destructive) {
+                    onDelete()
+                    showActions = false
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 4)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(10)
+        .frame(minWidth: 180)
     }
 
     private var outgoing: Bool { msg.direction == "outgoing" }

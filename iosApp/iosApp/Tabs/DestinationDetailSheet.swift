@@ -35,8 +35,7 @@ struct DestinationDetailSheet: View {
     let dest: StoredDestination
     /// Open the conversation for this hash.
     let onMessage: (String) -> Void
-    /// Non-nil only when the experimental RRC feature is enabled — adds
-    /// an "Open in Relay Chat" action on `rrc.hub` rows.
+    /// Adds an "Open in Relay Chat" action on `rrc.hub` rows.
     let onOpenAsRrcHub: ((StoredDestination) -> Void)?
     let onRename: (StoredDestination) -> Void
     let onToggleFavorite: (String, Bool) -> Void

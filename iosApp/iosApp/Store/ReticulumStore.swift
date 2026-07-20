@@ -84,6 +84,7 @@ final class ReticulumStore: ObservableObject {
     /// IosBleScanManager.central — so we hold a reference to the
     /// central across the connect call.
     private var tcpTransport: TcpInterface?
+    private var autoInterfaceTransport: AutoInterfaceTransport?
     private var bleTransport: IosBleTransport?
 
     /// Eagerly-instantiated BLE scanner. The CBCentralManager inside
@@ -121,6 +122,9 @@ final class ReticulumStore: ObservableObject {
     /// the Messages list (iOS parity with Android #23). Recomputed
     /// alongside the app badge in `recomputeUnreadBadge`.
     @Published var unreadByContact: [String: Int] = [:]
+
+    /// Latest visible message per contact, driving conversation previews.
+    @Published var latestMessageByContact: [String: ConversationPreview] = [:]
 
     /// Our own destination hash, hex. Nil until the engine has loaded /
     /// generated an identity (lazy on first attach).
@@ -167,15 +171,18 @@ final class ReticulumStore: ObservableObject {
     /// The unified Messages-tab conversation list — favorites and
     /// inbox merged and de-duplicated, most-recently-seen first. The
     /// Signal-style single list that replaced the Contacts/Inbox split
-    /// (docs/REDESIGN.md §6). iOS has no last-message-time projection,
-    /// so `lastSeen` is the recency proxy.
+    /// (docs/REDESIGN.md §6). Latest-message time drives recency, with
+    /// destination `lastSeen` as the fallback for empty conversations.
     var conversations: [StoredDestination] {
         var seen = Set<String>()
         var out: [StoredDestination] = []
         for d in favorites + inbox where seen.insert(d.hash).inserted {
             out.append(d)
         }
-        return out.sorted { $0.lastSeen > $1.lastSeen }
+        return out.sorted {
+            (latestMessageByContact[$0.hash]?.timestamp ?? $0.lastSeen)
+                > (latestMessageByContact[$1.hash]?.timestamp ?? $1.lastSeen)
+        }
     }
 
     /// Every observed destination (favorites-first, lastSeen-DESC).
@@ -218,6 +225,15 @@ final class ReticulumStore: ObservableObject {
         allDestinations.filter { $0.appName == "lxmf.propagation" }
     }
 
+    /// Announced `rrc.hub` destinations not yet in the user's hub list.
+    /// Mirrors Android `ReticulumViewModel.discoverableRrcHubs`.
+    var discoverableRrcHubs: [StoredDestination] {
+        let added = Set(rrcHubs.map(\.destHash))
+        return allDestinations.filter { dest in
+            dest.appName == "rrc.hub" && !added.contains(dest.hash as String)
+        }
+    }
+
     /// Fire-once "open this conversation" event. Drives tap-to-message
     /// from the Nodes tab → Messages tab navigation. UUID changes on
     /// every emit so observers re-trigger even when the user picks the
@@ -249,8 +265,7 @@ final class ReticulumStore: ObservableObject {
     /// inside an LXMF message bubble — the LXMF linkifier converts
     /// the matched substring into a custom-scheme URL and the
     /// conversation view's `OpenURLAction` decodes + fires this
-    /// event. ContentView switches the tab to Nomad (gated on
-    /// `nomadEnabled`); NomadView observes and navigates to the
+    /// event. ContentView switches the tab to Nomad; NomadView observes and navigates to the
     /// destination + path. Mirrors the same pattern as
     /// [OpenContactEvent] and [OpenRrcHubEvent].
     struct OpenNomadPageEvent: Equatable {
@@ -308,6 +323,11 @@ final class ReticulumStore: ObservableObject {
                 // here fail compilation with "cannot convert value of
                 // type 'Bool' to closure result type 'KotlinBoolean'".
                 KotlinBoolean(bool: UserDefaults.standard.bool(forKey: "security.dropUnverified"))
+            },
+            announceIntervalMs: {
+                let stored = UserDefaults.standard.object(forKey: "announce.intervalMs") as? Int
+                    ?? Int(AnnounceIntervalPresets.shared.DEFAULT_MS)
+                return KotlinLong(value: Int64(stored))
             }
         )
         // Eagerly trim a bloated destinations table before the UI's
@@ -464,6 +484,19 @@ final class ReticulumStore: ObservableObject {
         }
         subscriptions.append(inboxSub)
 
+        let latestMessagesSub = IosEngineFactoryKt.subscribe(
+            repos.observeLatestMessagePreviews(),
+            scope: factory.scope
+        ) { [weak self] list in
+            Task { @MainActor in
+                let messages = list as! [ConversationPreview]
+                self?.latestMessageByContact = Dictionary(
+                    uniqueKeysWithValues: messages.map { ($0.contactHash, $0) }
+                )
+            }
+        }
+        subscriptions.append(latestMessagesSub)
+
         // Engine event log — Log lines + MessageVerified events,
         // pattern-matched on the Kotlin side via engineEventToLogLine
         // so we don't have to guess at how K/N names sealed-class
@@ -500,7 +533,18 @@ final class ReticulumStore: ObservableObject {
             }
             if let info = IosEngineFactoryKt.engineEventAsIncomingMessage(event: typed) {
                 Task { @MainActor in
-                    IosNotifications.shared.post(info)
+                    let destination = self?.allDestinations
+                        .first(where: { $0.hash == info.contactHash })
+                    let destinationName = destination?
+                        .effectiveDisplayName
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let notificationTitle = destinationName.flatMap { name in
+                        name.isEmpty || name == destination?.appLabel ? nil : name
+                    } ?? String(info.contactHash.prefix(8))
+                    IosNotifications.shared.post(
+                        info,
+                        destinationName: notificationTitle
+                    )
                     // Per-contact-aware badge recompute: count every
                     // incoming row whose timestamp is past the
                     // recipient contact's last-opened mark. The post
@@ -609,6 +653,52 @@ final class ReticulumStore: ObservableObject {
         try await transport.disconnect()
     }
 
+    // ---- AutoInterface attach / detach ---------------------------------
+
+    /// Discover peers on the local LAN via IPv6 multicast (upstream RNS
+    /// AutoInterface interop). No host/port — peers are found automatically.
+    func connectAutoInterface() {
+        Task {
+            lastConnectError = nil
+            do {
+                if let prior = autoInterfaceTransport {
+                    try await disconnectAsync(prior)
+                }
+                engine.logExternal(line: "AutoInterface: starting LAN discovery (IPv6 multicast)")
+                let transport = AutoInterfaceTransport(
+                    scope: factory.scope,
+                    groupId: AutoInterfaceProtocol.shared.DEFAULT_GROUP_ID,
+                    txLogger: { [weak self] line in
+                        self?.engine.logExternal(line: line)
+                    },
+                    androidPeerTimeout: false
+                )
+                try await transport.connect()
+                autoInterfaceTransport = transport
+                engine.attach(transport: transport, kind: .autointerface)
+                try await engine.ensureIdentity()
+                await refreshOurDestHash()
+                addLastTransportKind("autointerface")
+            } catch {
+                lastConnectError = "\(error)"
+            }
+        }
+    }
+
+    func disconnectAutoInterface() {
+        guard let t = autoInterfaceTransport else { return }
+        removeLastTransportKind("autointerface")
+        Task {
+            engine.detach(kind: .autointerface)
+            try? await disconnectAsync(t)
+            autoInterfaceTransport = nil
+        }
+    }
+
+    private func disconnectAsync(_ transport: AutoInterfaceTransport) async throws {
+        try await transport.disconnect()
+    }
+
     // ---- BLE attach / detach -------------------------------------------
 
     /// Attach the freshly-discovered NUS peripheral via [scanner]. The
@@ -687,10 +777,10 @@ final class ReticulumStore: ObservableObject {
     /// and matches whatever the user last saved.
     private var currentRadioConfig: RadioConfig {
         let d = UserDefaults.standard
-        let freq = d.object(forKey: "radio.frequencyHz") as? Int64 ?? 904_375_000
-        let bw   = d.object(forKey: "radio.bandwidthHz") as? Int64 ?? 250_000
-        let sf   = d.object(forKey: "radio.spreadingFactor") as? Int ?? 10
-        let cr   = d.object(forKey: "radio.codingRate") as? Int ?? 5
+        let freq = d.object(forKey: "radio.frequencyHz") as? Int64 ?? 914_875_000
+        let bw   = d.object(forKey: "radio.bandwidthHz") as? Int64 ?? 125_000
+        let sf   = d.object(forKey: "radio.spreadingFactor") as? Int ?? 7
+        let cr   = d.object(forKey: "radio.codingRate") as? Int ?? 6
         let tx   = d.object(forKey: "radio.txPowerDbm") as? Int ?? 22
         return RadioConfig(
             frequencyHz: freq,
@@ -799,30 +889,36 @@ final class ReticulumStore: ObservableObject {
         let d = UserDefaults.standard
         if reachable {
             engine.logExternal(line: "network: path satisfied")
-            // Auto-reconnect when the user's saved transport was TCP
-            // and we don't have a live socket. BLE doesn't need this
-            // — the BLE central's own state callbacks drive its
-            // reconnect.
             let autoReconnect = d.object(forKey: kConnAutoReconnect) as? Bool ?? true
             guard autoReconnect else { return }
-            guard lastTransportKinds().contains("tcp"),
-                  tcpTransport == nil else { return }
-            let host = d.string(forKey: "tcp.host") ?? ""
-            let port = d.integer(forKey: "tcp.port")
-            guard !host.isEmpty, port > 0, port <= 65_535 else { return }
-            engine.logExternal(line: "network: auto-reconnect TCP \(host):\(port)")
-            connectTcp(host: host, port: Int32(port))
+            let kinds = lastTransportKinds()
+            if kinds.contains("tcp"), tcpTransport == nil {
+                let host = d.string(forKey: "tcp.host") ?? ""
+                let port = d.integer(forKey: "tcp.port")
+                if !host.isEmpty, port > 0, port <= 65_535 {
+                    engine.logExternal(line: "network: auto-reconnect TCP \(host):\(port)")
+                    connectTcp(host: host, port: Int32(port))
+                }
+            }
+            if kinds.contains("autointerface"), autoInterfaceTransport == nil {
+                engine.logExternal(line: "network: auto-reconnect AutoInterface (LAN)")
+                connectAutoInterface()
+            }
         } else {
-            engine.logExternal(line: "network: path unsatisfied — tearing down TCP")
-            // Involuntary teardown: KEEP the saved auto-reconnect
-            // target so the next path-satisfied transition brings the
-            // session back. Only an explicit Disconnect (via
-            // `disconnectTcp`) clears that target.
-            guard let t = tcpTransport else { return }
-            Task {
-                engine.detach(kind: .tcp)
-                try? await disconnectAsync(t)
-                tcpTransport = nil
+            engine.logExternal(line: "network: path unsatisfied — tearing down TCP / AutoInterface")
+            if let t = tcpTransport {
+                Task {
+                    engine.detach(kind: .tcp)
+                    try? await disconnectAsync(t)
+                    tcpTransport = nil
+                }
+            }
+            if let t = autoInterfaceTransport {
+                Task {
+                    engine.detach(kind: .autointerface)
+                    try? await disconnectAsync(t)
+                    autoInterfaceTransport = nil
+                }
             }
         }
     }
@@ -853,6 +949,14 @@ final class ReticulumStore: ObservableObject {
                 }
             } else {
                 engine.logExternal(line: "restore: TCP deferred — no network yet")
+            }
+        }
+        if kinds.contains("autointerface") {
+            if pathMonitor.isReachable {
+                engine.logExternal(line: "restore: reconnecting AutoInterface (LAN)")
+                connectAutoInterface()
+            } else {
+                engine.logExternal(line: "restore: AutoInterface deferred — no network yet")
             }
         }
         if kinds.contains("ble") {
@@ -1300,6 +1404,83 @@ final class ReticulumStore: ObservableObject {
         }
     }
 
+    /// Re-send an outgoing message — creates a fresh outbound row with the
+    /// same text, image, file, or voice clip (and reply target, if any).
+    func resendMessage(destinationHash: String, message: StoredMessage) {
+        guard message.direction == "outgoing" else { return }
+        let store = attachmentStore
+        Task {
+            lastSendError = nil
+            do {
+                if message.audioMode != nil {
+                    let ogg = await Self.loadRawAttachment(
+                        token: message.attachmentToken,
+                        legacyBytes: message.attachmentBytes,
+                        store: store
+                    )
+                    guard let ogg else { return }
+                    _ = try await engine.sendAudioMessage(
+                        destinationHash: destinationHash,
+                        audioBytes: Self.kotlinBytes(ogg),
+                        audioMode: message.audioMode!.int32Value
+                    )
+                } else {
+                    let imageData: Data? = (message.imageToken != nil || message.imageBytes != nil)
+                        ? await Self.loadRawAttachment(
+                            token: message.imageToken,
+                            legacyBytes: message.imageBytes,
+                            store: store
+                        )
+                        : nil
+                    let fileData: Data? = (message.attachmentToken != nil || message.attachmentBytes != nil)
+                        ? await Self.loadRawAttachment(
+                            token: message.attachmentToken,
+                            legacyBytes: message.attachmentBytes,
+                            store: store
+                        )
+                        : nil
+                    _ = try await engine.sendMessage(
+                        destinationHash: destinationHash,
+                        content: message.content,
+                        title: "",
+                        imageBytes: imageData.map(Self.kotlinBytes),
+                        fileBytes: fileData.map(Self.kotlinBytes),
+                        fileName: message.attachmentName,
+                        replyToMessageId: message.replyToMessageId
+                    )
+                }
+            } catch {
+                lastSendError = "\(error)"
+            }
+        }
+    }
+
+    /// Load attachment bytes from an off-row token or a legacy in-row blob.
+    private static func loadRawAttachment(
+        token: String?,
+        legacyBytes: KotlinByteArray?,
+        store: AttachmentStore?
+    ) async -> Data? {
+        await Task.detached(priority: .userInitiated) {
+            if let token, let path = store?.pathFor(token: token) {
+                return try? Data(contentsOf: URL(fileURLWithPath: path))
+            }
+            if let legacyBytes {
+                return await Self.dataFromKotlinStatic(legacyBytes)
+            }
+            return nil
+        }.value
+    }
+
+    /// Static variant of [dataFromKotlin] for use inside detached tasks.
+    private static func dataFromKotlinStatic(_ bytes: KotlinByteArray) -> Data {
+        var d = Data(count: Int(bytes.size))
+        for i in 0..<Int(bytes.size) {
+            d[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+        }
+        return d
+    }
+
     /// Copy a Swift `Data` into a Kotlin `ByteArray` for the K/N
     /// bridge — Kotlin/Native exposes no raw-`Data` entry point.
     private static func kotlinBytes(_ data: Data) -> KotlinByteArray {
@@ -1597,10 +1778,9 @@ final class ReticulumStore: ObservableObject {
     /// Cold-start RRC restore: once a transport is Connected, re-open
     /// every hub that had a live session before the app was shut down.
     /// The engine's room auto-rejoin then restores each hub's joined
-    /// rooms. Fires once per app session; gated on the experimental
-    /// RRC feature. Mirrors Android's `scheduleRrcRestore`.
+    /// rooms. Fires once per app session. Mirrors Android's
+    /// `scheduleRrcRestore`.
     private func scheduleRrcRestore() {
-        guard UserDefaults.standard.bool(forKey: "experimental.rrc") else { return }
         let hubs = UserDefaults.standard.stringArray(forKey: kConnLiveRrcHubs) ?? []
         guard !hubs.isEmpty else { return }
         rrcRestoreCancellable = $connections

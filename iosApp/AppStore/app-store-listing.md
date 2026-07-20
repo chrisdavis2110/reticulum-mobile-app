@@ -30,7 +30,7 @@ Alternates if the above is taken:
 ## Bundle ID
 
 ```
-io.github.thatsfguy.reticulum.ios
+com.diywarlord.reticulum.ios
 ```
 
 (Matches `iosApp/project.yml` and the App Store Connect record will need to use this exact string. If the volunteer needs a different prefix for their team — e.g. their organization's reverse-DNS — change it in `project.yml` first, then regenerate the Xcode project, then create a fresh App Store Connect record with the new ID.)

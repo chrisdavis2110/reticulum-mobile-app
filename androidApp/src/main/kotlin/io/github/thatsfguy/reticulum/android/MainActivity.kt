@@ -48,7 +48,6 @@ import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.storage.Preferences
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.screens.MessagesScreen
-import io.github.thatsfguy.reticulum.android.ui.screens.NodesScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.NomadScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.RoomsScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.SettingsScreen
@@ -258,17 +257,13 @@ class MainActivity : ComponentActivity() {
 
 private sealed class Tab(val route: String, val label: String, val icon: ImageVector) {
     data object Messages : Tab("messages", "Messages", Icons.Default.Email)
-    data object Nodes    : Tab("nodes", "Nodes", Icons.Default.Place)
     data object Nomad    : Tab("nomad", "Nomad", Icons.Default.Info)
     data object Rooms    : Tab("rooms", "Rooms", Icons.AutoMirrored.Filled.List)
     data object Settings : Tab("settings", "Settings", Icons.Default.Settings)
 }
 
-// Graph is no longer a top-level tab — it folded into the Nodes tab as a
-// Nodes/Graph pane switch (NodesScreen) to free a bottom-nav slot for the
-// RRC Rooms feature. Five is the Material 3 NavigationBar maximum, so the
-// experimental Rooms tab only claims its slot when the user has enabled
-// `experimentalRrc` — see the reactive `tabs` list in ReticulumApp.
+// Per-tab node lists live behind a list icon (messageable / NomadNet /
+// RRC hubs) — the standalone Nodes tab was removed.
 
 @Composable
 private fun ReticulumApp(
@@ -282,17 +277,8 @@ private fun ReticulumApp(
     val connections by viewModel.connectionStates.collectAsState(initial = emptyList())
     val anyConnected = connections.any { it.transport == TransportState.Connected }
 
-    // The experimental RRC Rooms tab only appears when the user has
-    // opted in via Settings. Recomputed when the preference flips.
-    val rrcEnabled by viewModel.experimentalRrc.collectAsState(initial = false)
-    val nomadEnabled by viewModel.nomadEnabled.collectAsState(initial = false)
-    val tabs = remember(rrcEnabled, nomadEnabled) {
-        buildList {
-            add(Tab.Nodes); add(Tab.Messages)
-            if (nomadEnabled) add(Tab.Nomad)
-            if (rrcEnabled) add(Tab.Rooms)
-            add(Tab.Settings)
-        }
+    val tabs = remember {
+        listOf(Tab.Messages, Tab.Nomad, Tab.Rooms, Tab.Settings)
     }
 
     // Notification deep-link consumer: when the Activity pushes a
@@ -381,7 +367,6 @@ private fun ReticulumApp(
                     if (startOnSettings) Tab.Settings.route else Tab.Messages.route,
             ) {
                 composable(Tab.Messages.route) { MessagesScreen(viewModel) }
-                composable(Tab.Nodes.route)    { NodesScreen(viewModel) }
                 composable(Tab.Nomad.route)    { NomadScreen(viewModel) }
                 composable(Tab.Rooms.route)    { RoomsScreen(viewModel) }
                 composable(Tab.Settings.route) { SettingsScreen(viewModel, onRequestPermissions) }

@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.platform
 
 import io.github.thatsfguy.reticulum.engine.IdentityCard
+import io.github.thatsfguy.reticulum.engine.AnnounceIntervalPresets
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.engine.RrcEvent
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
@@ -41,6 +42,7 @@ class IosEngineFactory(
      *  a known announce when this returns true. Wired to a SwiftUI
      *  @AppStorage toggle. Audit reference: 2026-05-13 MED-6. */
     private val dropUnverifiedProvider: () -> Boolean = { false },
+    private val announceIntervalMsProvider: () -> Long = { AnnounceIntervalPresets.DEFAULT_MS },
 ) {
     /**
      * Catches every uncaught coroutine exception thrown by children
@@ -93,6 +95,7 @@ class IosEngineFactory(
         nowMs = { Clock.System.now().toEpochMilliseconds() },
         displayNameProvider = displayNameProvider,
         dropUnverifiedProvider = dropUnverifiedProvider,
+        announceIntervalMsProvider = announceIntervalMsProvider,
         nomadPageCache = repositories.nomadPageCache,
         rrcRepo = repositories.rrc,
         attachmentStore = attachmentStore,
@@ -272,9 +275,11 @@ fun createIosEngineFactoryWithDisplayName(
 fun createIosEngineFactoryWithProviders(
     displayName: () -> String,
     dropUnverified: () -> Boolean,
+    announceIntervalMs: () -> Long = { AnnounceIntervalPresets.DEFAULT_MS },
 ): IosEngineFactory = IosEngineFactory(
     displayNameProvider = displayName,
     dropUnverifiedProvider = dropUnverified,
+    announceIntervalMsProvider = announceIntervalMs,
 )
 
 /**

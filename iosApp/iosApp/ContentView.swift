@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
-// Root tab-bar shell. Mirrors the Android NavigationBar after the UI
-// redesign (docs/REDESIGN.md §5): the default bar is Nodes · Messages ·
-// Settings, with Nomad and Relay Chat as opt-in tabs that only appear
-// once enabled from Settings → Features. Nodes is the leftmost tab.
-// Graph and Map are not tabs — they're pane switches inside Nodes.
+// Root tab-bar shell: Messages · Nomad · Rooms · Settings.
+// Per-tab node lists live behind a list.bullet toolbar button
+// (messageable / NomadNet / RRC hubs) — the standalone Nodes tab
+// was removed.
 
 import SwiftUI
 
@@ -17,12 +16,6 @@ struct ContentView: View {
     /// "system" leaves the scheme nil so iOS follows Display &
     /// Brightness — and the status bar tints itself to match.
     @AppStorage("themePreference") private var themePreference: String = "system"
-    /// Experimental Reticulum Relay Chat. When on, a Rooms tab appears
-    /// before Settings — mirrors the Android nav gate.
-    @AppStorage("experimental.rrc") private var experimentalRrc: Bool = false
-    /// Opt-in NomadNet browser. Default off; enabled from Settings →
-    /// Features. Mirrors the Android `nomadEnabled` preference gate.
-    @AppStorage("feature.nomad") private var nomadEnabled: Bool = false
     /// One-shot: a brand-new install lands on Settings → Connection
     /// (an empty Messages list is useless before a transport is up).
     @AppStorage("ui.firstLaunchRouted") private var firstLaunchRouted: Bool = false
@@ -31,29 +24,21 @@ struct ContentView: View {
     /// once on first launch to point at Connection, then cleared.
     @State private var pendingSettingsRoute: SettingsRoute?
 
-    enum Tab: Hashable { case nodes, messages, nomad, rooms, settings }
+    enum Tab: Hashable { case messages, nomad, rooms, settings }
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            NodesView()
-                .tabItem { Label("Nodes", systemImage: "mappin.and.ellipse") }
-                .tag(Tab.nodes)
-
             MessagesView()
                 .tabItem { Label("Messages", systemImage: "envelope") }
                 .tag(Tab.messages)
 
-            if nomadEnabled {
-                NomadView()
-                    .tabItem { Label("Nomad", systemImage: "globe") }
-                    .tag(Tab.nomad)
-            }
+            NomadView()
+                .tabItem { Label("Nomad", systemImage: "globe") }
+                .tag(Tab.nomad)
 
-            if experimentalRrc {
-                RoomsView()
-                    .tabItem { Label("Rooms", systemImage: "bubble.left.and.bubble.right") }
-                    .tag(Tab.rooms)
-            }
+            RoomsView()
+                .tabItem { Label("Rooms", systemImage: "bubble.left.and.bubble.right") }
+                .tag(Tab.rooms)
 
             SettingsView(pendingRoute: $pendingSettingsRoute)
                 .tabItem {
@@ -78,19 +63,15 @@ struct ContentView: View {
         // Open-RRC-hub deep-link (e.g. detail sheet's "Open in Relay
         // Chat" button) → switch to Rooms. RoomsView observes the same
         // event and pushes the hub's chat onto its NavigationStack.
-        // Gated on `experimentalRrc` because that's what conditionally
-        // renders the Rooms tab — selecting a hidden tag would
-        // silently no-op.
         .onChange(of: store.openRrcHubEvent) { _, new in
-            if new != nil, experimentalRrc { selectedTab = .rooms }
+            if new != nil { selectedTab = .rooms }
         }
         // Open-Nomad-page deep-link — fired by tapping a
-        // `<destHash>:/path` link in an LXMF message bubble. Gated
-        // on `nomadEnabled` (the Features toggle that conditionally
-        // renders the Nomad tab). NomadView observes the same event
-        // and navigates to the destination + path.
+        // `<destHash>:/path` link in an LXMF message bubble.
+        // NomadView observes the same event and navigates to the
+        // destination + path.
         .onChange(of: store.openNomadPageEvent) { _, new in
-            if new != nil, nomadEnabled { selectedTab = .nomad }
+            if new != nil { selectedTab = .nomad }
         }
         .preferredColorScheme(resolvedColorScheme)
         .onAppear {

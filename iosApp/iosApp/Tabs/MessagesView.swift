@@ -18,6 +18,7 @@ struct MessagesView: View {
     @State private var detailDest: StoredDestination?
     @State private var renameTarget: StoredDestination?
     @State private var pendingDelete: StoredDestination?
+    @State private var showNodeList = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -35,9 +36,33 @@ struct MessagesView: View {
                 content
             }
             .navigationTitle("Messages")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showNodeList = true } label: {
+                        Label("Contacts", systemImage: "list.bullet")
+                    }
+                }
+            }
+            .sheet(isPresented: $showNodeList) {
+                TabNodeListSheet(
+                    kind: .messagable,
+                    onSelect: { dest in
+                        path.append(dest.hash as String)
+                    },
+                    onAddManual: { hash, label in
+                        store.addManualDestination(hashHex: hash, label: label)
+                    },
+                    onApplyCard: { card in
+                        store.applyIdentityCard(card)
+                    }
+                )
+            }
             .navigationDestination(for: String.self) { hash in
                 if let dest = resolve(hash) {
-                    ConversationView(contact: dest)
+                    ConversationView(
+                        contact: dest,
+                        onShowContactInfo: { detailDest = dest }
+                    )
                 } else {
                     ContentUnavailableView(
                         "Destination not found",
@@ -51,7 +76,9 @@ struct MessagesView: View {
                     dest: dest,
                     onMessage: { hash in
                         detailDest = nil
-                        path.append(hash)
+                        if path.isEmpty {
+                            path.append(hash)
+                        }
                     },
                     onOpenAsRrcHub: nil,
                     onRename: { d in
@@ -94,11 +121,11 @@ struct MessagesView: View {
                 Button("Cancel", role: .cancel) { pendingDelete = nil }
             } message: { dest in
                 let name = dest.effectiveDisplayName.isEmpty ? "(unnamed)" : dest.effectiveDisplayName
-                Text("Removes \(name) from local storage along with all message history. If they announce again later they'll reappear in Nodes (without prior history).")
+                Text("Removes \(name) from local storage along with all message history. If they announce again later they'll reappear in Contacts (without prior history).")
             }
         }
-        // Tap-to-message deep-link from the Nodes tab. ContentView
-        // already switched the tab; we just push the conversation.
+        // Tap-to-message deep-link (notification / node picker).
+        // ContentView already switched the tab; we just push the conversation.
         .onChange(of: store.openContactEvent) { _, new in
             guard let event = new else { return }
             if !path.isEmpty { path.removeLast(path.count) }
@@ -151,7 +178,7 @@ struct MessagesView: View {
                 ContentUnavailableView(
                     "No conversations yet",
                     systemImage: "envelope",
-                    description: Text("Open a node on the Nodes tab and tap Message to start a conversation.")
+                    description: Text("Tap the list icon to browse messageable contacts and start a conversation.")
                 )
             } else {
                 ContentUnavailableView(
@@ -183,7 +210,11 @@ struct MessagesView: View {
     }
 
     private func threadRow(_ dest: StoredDestination) -> some View {
-        ThreadRow(dest: dest, unread: store.unreadByContact[dest.hash] ?? 0)
+        ThreadRow(
+            dest: dest,
+            latestMessage: store.latestMessageByContact[dest.hash],
+            unread: store.unreadByContact[dest.hash] ?? 0
+        )
             .contentShape(Rectangle())
             .onTapGesture { path.append(dest.hash as String) }
             .onLongPressGesture(minimumDuration: 0.4) { detailDest = dest }
@@ -217,6 +248,7 @@ struct MessagesView: View {
 
 private struct ThreadRow: View {
     let dest: StoredDestination
+    let latestMessage: ConversationPreview?
     /// Unread incoming count for this thread (iOS parity with Android
     /// #23). 0 hides the badge.
     var unread: Int = 0
@@ -228,8 +260,8 @@ private struct ThreadRow: View {
                 Text(name)
                     .font(.body)
                     .foregroundStyle(.primary)
-                Text(shortHash(dest.hash))
-                    .font(.caption.monospaced())
+                Text(messagePreview)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -262,6 +294,25 @@ private struct ThreadRow: View {
             return shortHash(dest.hash)
         }
         return value
+    }
+
+    private var messagePreview: String {
+        guard let message = latestMessage else { return "No messages yet" }
+        let body: String
+        if !message.content.isEmpty {
+            body = message.content
+                .split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+        } else if message.hasImage {
+            body = "📷 Photo"
+        } else if message.audioMode != nil {
+            body = "🎤 Voice message"
+        } else if message.hasFile {
+            body = "📎 \(message.attachmentName ?? "File")"
+        } else {
+            body = "Message"
+        }
+        return message.direction == "outgoing" ? "You: \(body)" : body
     }
 }
 

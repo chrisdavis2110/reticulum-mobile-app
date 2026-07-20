@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.android.storage
 
 import android.content.Context
 import android.content.SharedPreferences
+import io.github.thatsfguy.reticulum.engine.AnnounceIntervalPresets
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.KnownTcpNodes
 import io.github.thatsfguy.reticulum.transport.SavedNode
@@ -294,6 +295,19 @@ class Preferences(context: Context) {
         _dropUnverified.value = value
     }
 
+    private val _announceIntervalMs = MutableStateFlow(
+        AnnounceIntervalPresets.normalize(prefs.getLong(KEY_ANNOUNCE_INTERVAL_MS, AnnounceIntervalPresets.DEFAULT_MS)),
+    )
+    val announceIntervalMs: StateFlow<Long> = _announceIntervalMs.asStateFlow()
+
+    fun getAnnounceIntervalMs(): Long = _announceIntervalMs.value
+
+    fun setAnnounceIntervalMs(ms: Long) {
+        val normalized = AnnounceIntervalPresets.normalize(ms)
+        prefs.edit().putLong(KEY_ANNOUNCE_INTERVAL_MS, normalized).apply()
+        _announceIntervalMs.value = normalized
+    }
+
     /** Experimental: enable Reticulum Relay Chat (RRC). Off by default
      *  — RRC is a new wire protocol still under development and not yet
      *  interop-verified. Gates the RRC UI and engine session so it stays
@@ -358,6 +372,13 @@ class Preferences(context: Context) {
         _tcpEnabled.value = value
     }
 
+    private val _autoInterfaceEnabled = MutableStateFlow(prefs.getBoolean(KEY_AUTO_INTERFACE_ENABLED, true))
+    val autoInterfaceEnabled: StateFlow<Boolean> = _autoInterfaceEnabled.asStateFlow()
+    fun setAutoInterfaceEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_INTERFACE_ENABLED, value).apply()
+        _autoInterfaceEnabled.value = value
+    }
+
     private val _usbEnabled = MutableStateFlow(prefs.getBoolean(KEY_USB_ENABLED, false))
     val usbEnabled: StateFlow<Boolean> = _usbEnabled.asStateFlow()
     fun setUsbEnabled(value: Boolean) {
@@ -381,6 +402,53 @@ class Preferences(context: Context) {
         prefs.edit().putString(KEY_THEME, value).apply()
         _themePreference.value = value
     }
+
+    // ---- Notifications -------------------------------------------------
+
+    /** Master switch for all non-FGS alerts. When off, incoming LXMF
+     *  message notifications are not posted (the foreground service
+     *  indicator stays — Android requires it while connected). */
+    private val _notificationsEnabled = MutableStateFlow(prefs.getBoolean(KEY_NOTIFICATIONS_ENABLED, true))
+    val notificationsEnabled: StateFlow<Boolean> = _notificationsEnabled.asStateFlow()
+    fun setNotificationsEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_NOTIFICATIONS_ENABLED, value).apply()
+        _notificationsEnabled.value = value
+    }
+
+    private val _notificationsMessages = MutableStateFlow(prefs.getBoolean(KEY_NOTIFICATIONS_MESSAGES, true))
+    val notificationsMessages: StateFlow<Boolean> = _notificationsMessages.asStateFlow()
+    fun setNotificationsMessages(value: Boolean) {
+        prefs.edit().putBoolean(KEY_NOTIFICATIONS_MESSAGES, value).apply()
+        _notificationsMessages.value = value
+    }
+
+    private val _notificationsRooms = MutableStateFlow(prefs.getBoolean(KEY_NOTIFICATIONS_ROOMS, false))
+    val notificationsRooms: StateFlow<Boolean> = _notificationsRooms.asStateFlow()
+    fun setNotificationsRooms(value: Boolean) {
+        prefs.edit().putBoolean(KEY_NOTIFICATIONS_ROOMS, value).apply()
+        _notificationsRooms.value = value
+    }
+
+    private val _notificationsNomad = MutableStateFlow(prefs.getBoolean(KEY_NOTIFICATIONS_NOMAD, false))
+    val notificationsNomad: StateFlow<Boolean> = _notificationsNomad.asStateFlow()
+    fun setNotificationsNomad(value: Boolean) {
+        prefs.edit().putBoolean(KEY_NOTIFICATIONS_NOMAD, value).apply()
+        _notificationsNomad.value = value
+    }
+
+    private val _notificationsSound = MutableStateFlow(prefs.getBoolean(KEY_NOTIFICATIONS_SOUND, true))
+    val notificationsSound: StateFlow<Boolean> = _notificationsSound.asStateFlow()
+    fun setNotificationsSound(value: Boolean) {
+        prefs.edit().putBoolean(KEY_NOTIFICATIONS_SOUND, value).apply()
+        _notificationsSound.value = value
+    }
+
+    /** Whether an incoming LXMF alert should be posted. */
+    fun shouldNotifyMessages(): Boolean =
+        _notificationsEnabled.value && _notificationsMessages.value
+
+    fun shouldPlayNotificationSound(): Boolean =
+        shouldNotifyMessages() && _notificationsSound.value
 
     /** True until the app has been launched once. Drives the first-run
      *  landing on Settings → Connect — there is nothing to do on an
@@ -572,6 +640,7 @@ class Preferences(context: Context) {
         private const val KEY_RADIO_TXP = "radio_txp_dbm"
         private const val KEY_PROPAGATION_NODE = "propagation_node_hex"
         private const val KEY_DROP_UNVERIFIED = "drop_unverified_messages"
+        private const val KEY_ANNOUNCE_INTERVAL_MS = "announce_interval_ms"
         private const val KEY_EXPERIMENTAL_RRC = "experimental_rrc"
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
         private const val KEY_NOMAD_ENABLED = "nomad_enabled"
@@ -579,10 +648,16 @@ class Preferences(context: Context) {
         private const val KEY_BLE_ENABLED = "ble_enabled"
         private const val KEY_BT_CLASSIC_ENABLED = "bt_classic_enabled"
         private const val KEY_TCP_ENABLED = "tcp_enabled"
+        private const val KEY_AUTO_INTERFACE_ENABLED = "auto_interface_enabled"
         private const val KEY_USB_ENABLED = "usb_enabled"
         private const val KEY_PINNED_CONVERSATIONS = "pinned_conversations"
         private const val KEY_LAST_READ_TIMES = "last_read_times_per_contact"
         private const val KEY_THEME = "theme_preference"
+        private const val KEY_NOTIFICATIONS_ENABLED = "notifications_enabled"
+        private const val KEY_NOTIFICATIONS_MESSAGES = "notifications_messages"
+        private const val KEY_NOTIFICATIONS_ROOMS = "notifications_rooms"
+        private const val KEY_NOTIFICATIONS_NOMAD = "notifications_nomad"
+        private const val KEY_NOTIFICATIONS_SOUND = "notifications_sound"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].
         // Old constants removed — anything still importing them will fail

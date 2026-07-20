@@ -16,129 +16,289 @@ import Shared
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// RetiNet / MeshChatX-style browser chrome — nav buttons on one row,
+/// URL field + Go on the next so the address bar stays visible on narrow phones.
+private struct NomadBrowserChrome: View {
+    @Binding var urlInput: String
+    var canReload: Bool
+    var canGoForward: Bool
+    let onHome: () -> Void
+    let onReload: () -> Void
+    let onBack: () -> Void
+    let onForward: () -> Void
+    let onGo: () -> Void
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 4) {
+                browserButton("house", disabled: false, action: onHome)
+                browserButton("arrow.clockwise", disabled: !canReload, action: onReload)
+                browserButton("chevron.left", disabled: false, action: onBack)
+                browserButton("chevron.right", disabled: !canGoForward, action: onForward)
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 6) {
+                TextField("nodehash:/page/index.mu", text: $urlInput)
+                    .font(.caption.monospaced())
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(Color.secondary.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .frame(maxWidth: .infinity)
+                    .onSubmit { onGo() }
+                browserButton(
+                    "arrow.right.circle.fill",
+                    disabled: urlInput.trimmingCharacters(in: .whitespaces).isEmpty,
+                    action: onGo
+                )
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.secondary.opacity(0.06))
+    }
+
+    private func browserButton(_ systemName: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 16))
+                .frame(width: 30, height: 30)
+        }
+        .disabled(disabled)
+        .foregroundStyle(disabled ? Color.secondary.opacity(0.35) : Color.accentColor)
+    }
+}
+
 struct NomadView: View {
     @EnvironmentObject private var store: ReticulumStore
 
-    enum Filter: String, CaseIterable, Identifiable {
-        case all = "All"
-        case favorites = "Favorites"
-        var id: String { rawValue }
-    }
-
-    /// Hashable navigation target. Used both for in-list taps (with
-    /// the default `/page/index.mu` path) and for the deep-link
-    /// observer that handles `OpenNomadPageEvent`. The pair is the
-    /// minimum NomadPageView needs to bootstrap a fetch.
-    struct NomadNavRef: Hashable {
+    /// Target for the Browser pane — set when the user picks a node
+    /// from Nodes, enters a URL, or follows an OpenNomadPageEvent deep
+    /// link. `sessionId` bumps on every open so NomadPageView remounts
+    /// with a fresh history stack even when reopening the same hash.
+    struct BrowserSession: Hashable {
         let hash: String
         let path: String
+        let sessionId: Int
     }
 
-    @State private var filter: Filter = .all
+    private enum Pane: Hashable {
+        case nodes
+        case browser
+    }
+
+    @State private var pane: Pane = .nodes
     @State private var search: String = ""
-    /// Programmatic-nav path so the OpenNomadPageEvent deep-link can
-    /// push a target without the user picking a list row. NavigationLinks
-    /// now use value-based push, with `.navigationDestination` mapping
-    /// a [NomadNavRef] back to the page view.
-    @State private var path: NavigationPath = NavigationPath()
+    @State private var browserUrlInput = ""
+    @State private var browserSession: BrowserSession? = nil
+    @State private var nextSessionId = 0
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack {
             VStack(spacing: 0) {
-                filterBar
-                searchField
-                List(filtered, id: \.id) { node in
-                    NavigationLink(value: NomadNavRef(hash: node.hash, path: "/page/index.mu")) {
-                        NomadRow(
-                            node: node,
-                            onToggleFavorite: { fav in
-                                store.toggleFavorite(hash: node.hash, favorite: fav)
-                            }
-                        )
-                    }
+                Picker("View", selection: $pane) {
+                    Text("Nodes").tag(Pane.nodes)
+                    Text("Browser").tag(Pane.browser)
                 }
-                .listStyle(.plain)
-                .scrollDismissesKeyboard(.immediately)
-                .overlay {
-                    if filtered.isEmpty {
-                        ContentUnavailableView(
-                            "No NomadNet nodes",
-                            systemImage: "doc.text.magnifyingglass",
-                            description: Text(emptyMessage)
-                        )
-                    }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+
+                ZStack {
+                    nodesPane
+                        .opacity(pane == .nodes ? 1 : 0)
+                        .allowsHitTesting(pane == .nodes)
+                        .accessibilityHidden(pane != .nodes)
+                    browserPane
+                        .opacity(pane == .browser ? 1 : 0)
+                        .allowsHitTesting(pane == .browser)
+                        .accessibilityHidden(pane != .browser)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .navigationTitle("Nomad")
-            .navigationDestination(for: NomadNavRef.self) { ref in
-                if let node = store.allDestinations.first(where: { ($0.hash as String) == ref.hash }) {
-                    NomadPageView(node: node, initialPath: ref.path)
-                } else {
-                    ContentUnavailableView(
-                        "Destination not found",
-                        systemImage: "questionmark.circle",
-                        description: Text("This destination is no longer in the local store. Re-add it by hash to retry.")
-                    )
-                }
-            }
+            .navigationTitle(pane == .nodes ? "Nomad" : "Browser")
+            .navigationBarTitleDisplayMode(.inline)
         }
         // Open-Nomad-page deep-link (e.g. a `<destHash>:/path` link
         // tapped in an LXMF message bubble). ContentView already
-        // switched the tab; we reset the existing nav stack and push
-        // the requested destination + path so the user lands directly
-        // on the fetched page.
+        // switched the tab; open the Browser pane at that location.
         .onChange(of: store.openNomadPageEvent) { _, new in
             guard let event = new else { return }
-            if !path.isEmpty { path.removeLast(path.count) }
-            path.append(NomadNavRef(hash: event.hash, path: event.path))
+            openInBrowser(hash: event.hash, path: event.path)
         }
     }
 
-    private var filterBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack {
-                ForEach(Filter.allCases) { f in
-                    let selected = filter == f
-                    Button { filter = f } label: { Text(f.rawValue) }
-                        .buttonStyle(.bordered)
-                        .tint(selected ? Color.accentColor : Color.secondary)
+    // MARK: - Nodes pane
+
+    @ViewBuilder
+    private var nodesPane: some View {
+        if favorites.isEmpty && allDiscovered.isEmpty {
+            ContentUnavailableView(
+                "No NomadNet nodes",
+                systemImage: "doc.text.magnifyingglass",
+                description: Text(emptyMessage)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            VStack(spacing: 0) {
+                if !allDiscovered.isEmpty {
+                    HStack {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                        TextField("Search discovered nodes", text: $search)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        if !search.isEmpty {
+                            Button { search = "" } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.bar)
                 }
+                List {
+                    if !favorites.isEmpty {
+                        Section("Favorites") {
+                            ForEach(favorites, id: \.id) { node in
+                                NomadRow(
+                                    node: node,
+                                    onToggleFavorite: { fav in
+                                        store.toggleFavorite(hash: node.hash, favorite: fav)
+                                    }
+                                )
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    openInBrowser(hash: node.hash as String, path: "/page/index.mu")
+                                }
+                            }
+                        }
+                    }
+                    if !allDiscovered.isEmpty {
+                        Section("Discovered on the network") {
+                            if filteredDiscovered.isEmpty {
+                                Text("No nodes match “\(search)”.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(filteredDiscovered, id: \.id) { node in
+                                    NomadRow(
+                                        node: node,
+                                        onToggleFavorite: { fav in
+                                            store.toggleFavorite(hash: node.hash, favorite: fav)
+                                        }
+                                    )
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        openInBrowser(hash: node.hash as String, path: "/page/index.mu")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .listStyle(.insetGrouped)
+                .scrollDismissesKeyboard(.immediately)
             }
-            .padding(.horizontal)
-            .padding(.top, 8)
         }
     }
 
-    private var searchField: some View {
-        HStack {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search by name or hash", text: $search)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            if !search.isEmpty {
-                Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+    // MARK: - Browser pane
+
+    @ViewBuilder
+    private var browserPane: some View {
+        if let session = browserSession,
+           let node = store.allDestinations.first(where: { ($0.hash as String) == session.hash }) {
+            NomadPageView(
+                node: node,
+                initialPath: session.path,
+                isActive: pane == .browser,
+                onExitToNodes: { pane = .nodes }
+            )
+            .id(session.sessionId)
+        } else if let session = browserSession {
+            // Stub not yet in the store (deep-link / URL bar) — show
+            // chrome so the user can retry once the destination lands.
+            VStack(spacing: 0) {
+                NomadBrowserChrome(
+                    urlInput: $browserUrlInput,
+                    canReload: false,
+                    canGoForward: false,
+                    onHome: { browserUrlInput = "" },
+                    onReload: {},
+                    onBack: { pane = .nodes },
+                    onForward: {},
+                    onGo: { navigateFromBrowserUrl(browserUrlInput) }
+                )
+                ContentUnavailableView(
+                    "Destination not found",
+                    systemImage: "questionmark.circle",
+                    description: Text("Waiting for \(session.hash.prefix(8))… to appear in the local store. Re-enter the URL or pick a node from Nodes.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        } else {
+            VStack(spacing: 0) {
+                NomadBrowserChrome(
+                    urlInput: $browserUrlInput,
+                    canReload: false,
+                    canGoForward: false,
+                    onHome: { browserUrlInput = "" },
+                    onReload: {},
+                    onBack: { pane = .nodes },
+                    onForward: {},
+                    onGo: { navigateFromBrowserUrl(browserUrlInput) }
+                )
+                ContentUnavailableView(
+                    "No page open",
+                    systemImage: "globe",
+                    description: Text("Pick a node from the Nodes tab, or enter a Nomad URL above.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .padding(8)
-        .background(Color.secondary.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal)
-        .padding(.vertical, 6)
     }
 
-    private var filtered: [StoredDestination] {
-        let nomadNodes = store.allDestinations.filter { $0.appName == "nomadnetwork.node" }
-        let byFilter: [StoredDestination] = {
-            switch filter {
-            case .all: return nomadNodes
-            case .favorites: return nomadNodes.filter { $0.favorite }
-            }
-        }()
+    private func openInBrowser(hash: String, path: String) {
+        nextSessionId += 1
+        browserSession = BrowserSession(hash: hash, path: path, sessionId: nextSessionId)
+        browserUrlInput = LinkTargetKt.formatNomadUrl(nodeHashHex: hash, path: path)
+        pane = .browser
+    }
+
+    private func navigateFromBrowserUrl(_ raw: String) {
+        guard let parsed = LinkTargetKt.parseNomadUrl(raw: raw, currentNodeHash: nil) else { return }
+        if !store.allDestinations.contains(where: { ($0.hash as String) == parsed.nodeHashHex }) {
+            store.addManualDestination(hashHex: parsed.nodeHashHex, label: "")
+            store.requestPath(hashHex: parsed.nodeHashHex)
+        }
+        openInBrowser(hash: parsed.nodeHashHex, path: parsed.path)
+    }
+
+    private var nomadNodes: [StoredDestination] {
+        store.allDestinations.filter { $0.appName == "nomadnetwork.node" }
+    }
+
+    /// Starred nodes — always shown in full (search does not filter them),
+    /// matching Rooms' "My hubs" section.
+    private var favorites: [StoredDestination] {
+        nomadNodes.filter(\.favorite)
+    }
+
+    /// Every non-favorite NomadNet node (pre-search).
+    private var allDiscovered: [StoredDestination] {
+        nomadNodes.filter { !$0.favorite }
+    }
+
+    /// Discovered nodes matching the search box.
+    private var filteredDiscovered: [StoredDestination] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return byFilter }
-        return byFilter.filter { d in
+        guard !q.isEmpty else { return allDiscovered }
+        return allDiscovered.filter { d in
             d.effectiveDisplayName.lowercased().contains(q) ||
                 d.displayName.lowercased().contains(q) ||
                 (d.appLabel?.lowercased().contains(q) ?? false) ||
@@ -147,11 +307,7 @@ struct NomadView: View {
     }
 
     private var emptyMessage: String {
-        if !search.isEmpty { return "Nothing matches “\(search)”." }
-        switch filter {
-        case .all: return "Connect a transport on Settings; nodes appear here as their announces arrive."
-        case .favorites: return "Star a NomadNet node from this tab to bring it here."
-        }
+        "Connect a transport on Settings; nodes appear here as their announces arrive. Star one to pin it under Favorites."
     }
 }
 
@@ -241,11 +397,16 @@ private struct NomadPageView: View {
     /// fallback. Cross-node link follow swaps `currentHash` away
     /// from it.
     let node: StoredDestination
+    /// Called when the user leaves the browser session for the Nodes
+    /// pane (toolbar Nodes button, or Back with an empty in-page
+    /// history). Parent switches the segmented control; the page
+    /// session stays mounted so returning to Browser resumes it.
+    let onExitToNodes: () -> Void
+    /// False while the parent shows the Nodes pane (view stays mounted
+    /// under opacity 0). Hides this page's nav title/toolbar so they
+    /// don't bleed onto the Nodes chrome.
+    var isActive: Bool = true
     @EnvironmentObject private var store: ReticulumStore
-    /// Standard SwiftUI pop-the-NavigationStack handle — used by the
-    /// smart leading-edge Back button as the fallback when the
-    /// in-page history stack is empty.
-    @Environment(\.dismiss) private var dismiss
 
     /// Destination + title currently being browsed. Starts as `node`
     /// and is reassigned in place when a cross-node link is followed
@@ -262,6 +423,8 @@ private struct NomadPageView: View {
     /// produced the page so a back-from-result lands on the full
     /// search results, not the empty form.
     @State private var history: [NomadHistoryEntry] = []
+    @State private var forwardHistory: [NomadHistoryEntry] = []
+    @State private var urlInput: String = ""
     /// The POST data (if any) that produced the currently-displayed
     /// page. `nil` when the page was a plain GET. Captured into the
     /// next pushed `NomadHistoryEntry` so Back can replay the submit.
@@ -283,27 +446,32 @@ private struct NomadPageView: View {
     @State private var pendingDownload: NomadFileDocument? = nil
     @State private var fileError: String? = nil
 
-    init(node: StoredDestination, initialPath: String = "/page/index.mu") {
+    init(
+        node: StoredDestination,
+        initialPath: String = "/page/index.mu",
+        isActive: Bool = true,
+        onExitToNodes: @escaping () -> Void
+    ) {
         self.node = node
+        self.isActive = isActive
+        self.onExitToNodes = onExitToNodes
         _currentHash = State(initialValue: node.hash)
         _path = State(initialValue: initialPath)
         let name = node.effectiveDisplayName
         _currentTitle = State(initialValue: name.isEmpty ? "(unnamed)" : name)
     }
 
-    enum PageState {
+    enum PageState: Equatable {
         case loading
         case loaded(String)
         case error(String)
     }
 
     var body: some View {
-        ScrollView {
+        VStack(spacing: 0) {
+            browserBar
+            ScrollView {
             VStack(alignment: .leading, spacing: 8) {
-                Text(path)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-
                 switch pageState {
                 case .loading:
                     HStack {
@@ -346,7 +514,7 @@ private struct NomadPageView: View {
                                 if !store.allDestinations.contains(where: { ($0.hash as String) == cross.destHashHex }) {
                                     store.addManualDestination(
                                         hashHex: cross.destHashHex,
-                                        label: "(via cross-node form)"
+                                        label: ""
                                     )
                                     store.requestPath(hashHex: cross.destHashHex)
                                 }
@@ -407,6 +575,8 @@ private struct NomadPageView: View {
             }
             .padding()
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
         // .fileExporter pops once pendingDownload is set with the
         // bytes + filename returned from fetchNomadFileBridge. User
         // picks a destination (Files app, iCloud Drive, Dropbox via
@@ -431,53 +601,19 @@ private struct NomadPageView: View {
         // tracks the swipe — feels less abrupt than .immediately
         // when the user is reading a long page mid-typing.
         .scrollDismissesKeyboard(.interactively)
-        .keyboardDoneToolbar()
-        .navigationTitle(currentTitle)
+        // No `.keyboardDoneToolbar()` — that accessory bar sat on top
+        // of micron form fields and the URL bar. Scroll-to-dismiss
+        // already covers exit.
+        .navigationTitle(isActive ? currentTitle : "Nomad")
         .navigationBarTitleDisplayMode(.inline)
-        // Take over the leading back-button slot — the natural Back
-        // tap should pop our in-page history (one nav step within the
-        // node) first, only falling through to the NavigationStack
-        // pop (back to the directory) when history is empty. Tester
-        // report (2026-05-21): "search engine — when I click a
-        // result it goes to the linked page, but Back takes me to
-        // the list of nomad pages instead of back to the search
-        // results." That was the system back arrow popping the whole
-        // page view; this hides it.
-        .navigationBarBackButtonHidden(true)
+        .toolbar(isActive ? .visible : .hidden, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Button {
-                    if let prior = history.popLast() {
-                        currentHash = prior.hash
-                        currentTitle = prior.title
-                        path = prior.path
-                        // Replay the form submit if the prior page
-                        // was POST-driven; otherwise re-issue as a
-                        // plain GET. v1.2.15 / ios-v1.0.79 fix.
-                        if let data = prior.postData {
-                            submit(data: data)
-                        } else {
-                            fetch()
-                        }
-                    } else {
-                        // No more in-page history — fall back to
-                        // popping the NavigationStack so the user
-                        // exits to the directory.
-                        dismiss()
-                    }
-                } label: {
-                    Image(systemName: "chevron.backward")
+                Button { onExitToNodes() } label: {
+                    Label("Nodes", systemImage: "list.bullet")
                 }
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button { fetch() } label: { Image(systemName: "arrow.clockwise") }
-
-                // Share — hands the upstream-NomadNet cross-node
-                // link format `<destHash>:/path` (Browser.py:248) to
-                // the system share sheet. Pasteable into any
-                // NomadNet client. Not yet tappable in our own LXMF
-                // bubbles until the linkifier gains the same regex
-                // — see the v1.2.14 / ios-v1.0.78 follow-up.
                 ShareLink(item: "\(currentHash):\(path)") {
                     Image(systemName: "square.and.arrow.up")
                 }
@@ -524,7 +660,109 @@ private struct NomadPageView: View {
         } message: {
             Text("Removes every cached page from \(currentTitle) on this device. Next fetch will hit the network. The cache is local only.")
         }
-        .task { fetch() }
+        .task { syncUrlBar(); fetch() }
+        .onChange(of: currentHash) { _, _ in syncUrlBar() }
+        .onChange(of: path) { _, _ in syncUrlBar() }
+        .onChange(of: store.allDestinations) { _, dests in
+            // When a URL-bar / cross-node stub later announces, swap
+            // the nav title from the short-hash placeholder to the
+            // node's real name.
+            guard let live = dests.first(where: { ($0.hash as String) == currentHash }) else { return }
+            let name = live.effectiveDisplayName
+            guard !name.isEmpty, name != currentTitle else { return }
+            currentTitle = name
+        }
+    }
+
+    // MARK: - Browser chrome (RetiNet / MeshChatX-style)
+
+    private var browserBar: some View {
+        NomadBrowserChrome(
+            urlInput: $urlInput,
+            canReload: pageState != .loading,
+            canGoForward: !forwardHistory.isEmpty,
+            onHome: { goHome() },
+            onReload: { fetch() },
+            onBack: { goBack() },
+            onForward: { goForward() },
+            onGo: { goToUrl() }
+        )
+    }
+
+    /// Leave the browser pane for the Nodes directory. Session stays
+    /// mounted so switching back to Browser resumes this page.
+    private func exitToNodeList() {
+        onExitToNodes()
+    }
+
+    private func syncUrlBar() {
+        urlInput = LinkTargetKt.formatNomadUrl(nodeHashHex: currentHash, path: path)
+    }
+
+    private func goHome() {
+        let home = LinkTargetKt.formatNomadUrl(nodeHashHex: currentHash, path: "/page/index.mu")
+        navigateToUrl(home)
+    }
+
+    private func goBack() {
+        if let prior = history.popLast() {
+            forwardHistory.append(NomadHistoryEntry(
+                hash: currentHash, title: currentTitle, path: path,
+                postData: currentPagePostData,
+            ))
+            restoreHistoryEntry(prior)
+        } else {
+            onExitToNodes()
+        }
+    }
+
+    private func goForward() {
+        guard let next = forwardHistory.popLast() else { return }
+        pushHistory()
+        restoreHistoryEntry(next)
+    }
+
+    private func goToUrl() {
+        navigateToUrl(urlInput)
+    }
+
+    private func restoreHistoryEntry(_ entry: NomadHistoryEntry) {
+        currentHash = entry.hash
+        currentTitle = entry.title
+        path = entry.path
+        syncUrlBar()
+        if let data = entry.postData {
+            submit(data: data)
+        } else {
+            fetch()
+        }
+    }
+
+    private func navigateToUrl(_ raw: String) {
+        guard let parsed = LinkTargetKt.parseNomadUrl(raw: raw, currentNodeHash: currentHash) else {
+            pageState = .error("Invalid Nomad URL. Try nodehash:/page/index.mu")
+            return
+        }
+        forwardHistory.removeAll()
+        if parsed.nodeHashHex != currentHash {
+            pushHistory()
+            if !store.allDestinations.contains(where: { ($0.hash as String) == parsed.nodeHashHex }) {
+                store.addManualDestination(hashHex: parsed.nodeHashHex, label: "")
+                store.requestPath(hashHex: parsed.nodeHashHex)
+            }
+            currentHash = parsed.nodeHashHex
+            if let live = store.allDestinations.first(where: { ($0.hash as String) == parsed.nodeHashHex }) {
+                let name = live.effectiveDisplayName
+                currentTitle = name.isEmpty ? "(unnamed)" : name
+            } else {
+                currentTitle = String(parsed.nodeHashHex.prefix(8)) + "…"
+            }
+        } else if parsed.path != path {
+            pushHistory()
+        }
+        path = parsed.path
+        syncUrlBar()
+        fetch()
     }
 
     /// Live favorite flag for this node — re-derived on every render
@@ -573,7 +811,7 @@ private struct NomadPageView: View {
             // signal a notification tap uses). Mirrors Android's
             // LinkTarget.Lxmf branch.
             if !store.allDestinations.contains(where: { ($0.hash as String) == lxmf.destHashHex }) {
-                store.addManualDestination(hashHex: lxmf.destHashHex, label: "(via nomad link)")
+                store.addManualDestination(hashHex: lxmf.destHashHex, label: "")
             }
             store.toggleFavorite(hash: lxmf.destHashHex, favorite: true)
             store.openContact(hash: lxmf.destHashHex)
@@ -590,6 +828,7 @@ private struct NomadPageView: View {
             hash: currentHash, title: currentTitle, path: path,
             postData: currentPagePostData,
         ))
+        forwardHistory.removeAll()
     }
 
     /// Follow a cross-node link: swap the browsed destination to
@@ -602,7 +841,7 @@ private struct NomadPageView: View {
         pushHistory()
         let known = store.allDestinations.first { ($0.hash as String) == hash }
         if known == nil {
-            store.addManualDestination(hashHex: hash, label: "(via cross-node link)")
+            store.addManualDestination(hashHex: hash, label: "")
             // Fire-and-forget path request so the reply lands while the
             // user waits for fetch() — matches Android resolveOrPrepareDestination.
             store.requestPath(hashHex: hash)
